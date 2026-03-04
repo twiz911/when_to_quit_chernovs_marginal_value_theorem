@@ -29,6 +29,26 @@ http://localhost:8000
 
 The app will guide you through setup on first launch.
 
+## 🔧 Configuration
+
+### Using the Same Spreadsheet Across Domains
+
+By default, each domain (localhost, GitHub Pages, etc.) creates its own spreadsheet. To use the **same spreadsheet** across all domains:
+
+1. Run the app once to create a spreadsheet
+2. Open the spreadsheet in Google Sheets
+3. Copy the spreadsheet ID from the URL:
+   ```
+   https://docs.google.com/spreadsheets/d/YOUR_SPREADSHEET_ID_HERE/edit
+   ```
+4. Edit `app.js` and set:
+   ```javascript
+   const SPREADSHEET_ID = 'YOUR_SPREADSHEET_ID_HERE';
+   ```
+5. Save and reload the app
+
+Now localhost and GitHub Pages will share the same data!
+
 ## 📖 About the Marginal Value Theorem
 
 The **Marginal Value Theorem** (Charnov, 1976) suggests that an organism should leave a patch when the rate of energy intake drops below the average rate for the habitat. 

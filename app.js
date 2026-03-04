@@ -4,6 +4,10 @@ const API_KEY = 'AIzaSyDMLfR5FEwm8F4l2AZFB0xgHoM1PlTwEpM';        // Run from an
 
 const CLIENT_ID = '198184405189-k0fgpof1g7u9tlkd332gdi7f9v627mgc.apps.googleusercontent.com';
 
+// Optional: Set your spreadsheet ID here to share the same data across different domains (localhost + GitHub Pages)
+// Leave empty to create a new spreadsheet or use domain-specific storage
+// Example: const SPREADSHEET_ID = '1abc...xyz';
+const SPREADSHEET_ID = '1UYVZMilFCtTNoFimamdNYkGXRcw-N72GiQyckBEGv_c';  
 
 /*******************************************************************/
 
@@ -14,7 +18,7 @@ const SCOPES = 'https://www.googleapis.com/auth/spreadsheets';
 let gapiInited = false;
 let gisInited = false;
 let tokenClient;
-let spreadsheetId = localStorage.getItem('spreadsheetId') || null;
+let spreadsheetId = SPREADSHEET_ID || localStorage.getItem('spreadsheetId') || null;
 let currentActivity = null;
 let timerInterval = null;
 let timerStartTime = null;
@@ -301,7 +305,11 @@ async function setupSpreadsheet() {
                 ]
             });
             spreadsheetId = response.result.spreadsheetId;
-            localStorage.setItem('spreadsheetId', spreadsheetId);
+            
+            // Only save to localStorage if not using a hardcoded SPREADSHEET_ID
+            if (!SPREADSHEET_ID) {
+                localStorage.setItem('spreadsheetId', spreadsheetId);
+            }
             
             // Initialize headers
             await gapi.client.sheets.spreadsheets.values.update({

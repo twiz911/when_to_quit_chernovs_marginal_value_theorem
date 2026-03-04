@@ -1,0 +1,20 @@
+# Editor directories and files
+.vscode/
+.idea/
+*.swp
+*.swo
+*~
+
+# OS files
+.DS_Store
+Thumbs.db
+
+# Logs
+*.log
+
+# Don't commit credentials (keep template only)
+# Note: Actual credentials should be in app.js which is committed
+# but users need to add their own API keys
+
+# Temporary files
+*.tmp

@@ -1,0 +1,238 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <meta name="apple-mobile-web-app-capable" content="yes">
+    <meta name="mobile-web-app-capable" content="yes">
+    <title>Activity Tracker - Marginal Value Theorem</title>
+    <link rel="stylesheet" href="styles.css">
+</head>
+<body>
+    <div id="app">
+        <!-- Home Page -->
+        <div id="homePage" class="page active">
+            <header>
+                <h1>Activity Tracker</h1>
+                <p class="subtitle">Marginal Value Theorem</p>
+            </header>
+            
+            <div id="addActivityContainer" class="add-activity-container">
+                <button id="addActivityBtn" class="btn btn-primary">+ Add New Activity</button>
+                
+                <div id="addActivityInline" class="add-activity-inline hidden">
+                    <input type="text" id="activityNameInline" placeholder="Activity name..." />
+                    <button id="saveActivityBtn" class="btn btn-success btn-icon">✓</button>
+                    <button id="cancelActivityBtn" class="btn btn-secondary btn-icon">✕</button>
+                </div>
+            </div>
+            
+            <div id="activitiesList" class="activities-list">
+                <!-- Activities will be loaded here -->
+            </div>
+            
+            <div id="loadingIndicator" class="loading">Loading activities...</div>
+        </div>
+
+        <!-- Error Modal -->
+        <div id="errorModal" class="modal hidden">
+            <div class="modal-content">
+                <div class="error-icon">⚠️</div>
+                <h2>Google Sheets Error</h2>
+                <p id="errorMessage" class="error-message"></p>
+                
+                <!-- Popup Blocker Instructions -->
+                <div id="popupInstructions" class="popup-instructions hidden">
+                    <h3>🚫 Popup Blocked</h3>
+                    <p><strong>Your browser blocked the Google sign-in popup.</strong></p>
+                    
+                    <div class="browser-instructions">
+                        <h4>How to Allow Popups:</h4>
+                        <ul>
+                            <li><strong>Chrome/Edge:</strong> Click the popup icon <span class="icon">🚫</span> in the address bar (right side), then "Always allow popups from localhost"</li>
+                            <li><strong>Safari:</strong> Safari menu → Settings → Websites → Pop-up Windows → Allow for "localhost"</li>
+                            <li><strong>Firefox:</strong> Click the shield icon <span class="icon">🛡️</span> in address bar → Turn off blocking</li>
+                        </ul>
+                    </div>
+                    
+                    <p class="help-text">After allowing popups, click "Retry Connection" below.</p>
+                </div>
+                
+                <!-- Origin Mismatch Instructions -->
+                <div id="originInstructions" class="origin-instructions hidden">
+                    <h3>🔒 JavaScript Origin Not Authorized</h3>
+                    <p><strong>Your OAuth Client ID is not configured for this origin.</strong></p>
+                    
+                    <div class="browser-instructions">
+                        <h4>How to Fix:</h4>
+                        <ol>
+                            <li>Go to: <a href="https://console.cloud.google.com/apis/credentials" target="_blank"><strong>Google Cloud Console - Credentials</strong></a></li>
+                            <li>Find your <strong>OAuth 2.0 Client ID</strong> and click the edit icon (pencil)</li>
+                            <li>Under <strong>"Authorized JavaScript origins"</strong>, click <strong>"+ ADD URI"</strong></li>
+                            <li>Add your current origin:
+                                <div class="code-box" id="currentOrigin"></div>
+                            </li>
+                            <li>Click <strong>"SAVE"</strong></li>
+                            <li>Wait 1-2 minutes for changes to propagate</li>
+                        </ol>
+                    </div>
+                    
+                    <p class="help-text">After adding the origin, click "Retry Connection" below.</p>
+                </div>
+                
+                <!-- Test User Instructions -->
+                <div id="testUserInstructions" class="test-user-instructions hidden">
+                    <h3>👤 Test User Not Authorized</h3>
+                    <p><strong>Your email is not added as a test user for this app.</strong></p>
+                    
+                    <div class="browser-instructions">
+                        <h4>How to Add Yourself as a Test User:</h4>
+                        <ol>
+                            <li>Go to: <a href="https://console.cloud.google.com/apis/credentials/consent" target="_blank"><strong>OAuth Consent Screen</strong></a></li>
+                            <li>Make sure your project is selected (top dropdown)</li>
+                            <li>Scroll down to <strong>"Test users"</strong> section</li>
+                            <li>Click <strong>"+ ADD USERS"</strong></li>
+                            <li>Add your email address: <code id="testUserEmail"></code></li>
+                            <li>Click <strong>"SAVE"</strong></li>
+                            <li>Wait 1-2 minutes for changes to take effect</li>
+                        </ol>
+                        
+                        <div class="info-box">
+                            <strong>Note:</strong> Your app is in "Testing" mode. This is normal for personal apps. Only test users you add can sign in. You can add up to 100 test users.
+                        </div>
+                    </div>
+                    
+                    <p class="help-text">After adding your email as a test user, click "Retry Connection" below.</p>
+                </div>
+                
+                <div class="setup-instructions">
+                    <h3>Quick Setup Guide:</h3>
+                    <ol>
+                        <li><strong>Enable Google Sheets API:</strong>
+                            <ul>
+                                <li>Go to: <a href="https://console.cloud.google.com/apis/library/sheets.googleapis.com" target="_blank">Google Sheets API</a></li>
+                                <li>Select your project (top dropdown)</li>
+                                <li>Click the <strong>Enable</strong> button</li>
+                                <li>⚠️ You may have other APIs enabled - that's fine, but you MUST enable Google Sheets API specifically</li>
+                            </ul>
+                        </li>
+                        <li><strong>Get API Credentials:</strong>
+                            <ul>
+                                <li>Go to: <a href="https://console.cloud.google.com/apis/credentials/wizard?api=sheets.googleapis.com" target="_blank">Credentials Wizard</a></li>
+                                <li>Create <strong>API Key</strong> AND <strong>OAuth Client ID</strong></li>
+                                <li>For OAuth: choose "Web application" and add origin: <code id="setupOrigin"></code></li>
+                            </ul>
+                        </li>
+                        <li><strong>Add Test User:</strong>
+                            <ul>
+                                <li>Go to: <a href="https://console.cloud.google.com/apis/credentials/consent" target="_blank">OAuth Consent Screen</a></li>
+                                <li>Under "Test users", click "+ ADD USERS"</li>
+                                <li>Add your email address</li>
+                            </ul>
+                        </li>
+                        <li><strong>Configure app.js:</strong>
+                            <ul>
+                                <li>Open <code>app.js</code> in a text editor</li>
+                                <li>Replace <code>YOUR_API_KEY_HERE</code> with your API key</li>
+                                <li>Replace <code>YOUR_CLIENT_ID_HERE</code> with your Client ID</li>
+                            </ul>
+                        </li>
+             
+                        <li><strong>Reload the page</strong></li>
+                    </ol>
+                </div>
+                
+                <button id="retryConnectionBtn" class="btn btn-secondary">Retry Connection</button>
+            </div>
+        </div>
+
+        <!-- Add Activity Page -->
+        <!-- Activity Detail Page -->
+        <div id="activityDetailPage" class="page">
+            <header>
+                <button class="btn-back" onclick="showPage('homePage')">← Back</button>
+                <h2 id="activityTitle">Activity</h2>
+            </header>
+            
+            <div class="activity-stats">
+                <div class="stat-card">
+                    <div class="stat-label">Average Score</div>
+                    <div id="avgRewardTime" class="stat-value">--</div>
+                    <div id="avgScoreNote" class="score-note hidden"></div>
+                </div>
+                <div class="stat-card">
+                    <div class="stat-label">Last Score</div>
+                    <div id="lastRewardTime" class="stat-value">--</div>
+                    <div id="lastScoreNote" class="score-note hidden"></div>
+                </div>
+            </div>
+            
+            <div id="warningBox" class="warning-box hidden">
+                <div class="warning-icon">⚠️</div>
+                <div class="warning-text">
+                    <strong>Warning!</strong><br>
+                    Your last score is below the average.<br>
+                    Consider switching activities.
+                </div>
+            </div>
+            
+            <!-- Timer Section -->
+            <div class="timer-section">
+                <h3>Track Session</h3>
+                
+                <div class="timer-display" id="timerDisplay">00:00:00</div>
+                
+                <div class="timer-controls">
+                    <button id="startTimerBtn" class="btn btn-success">Start Timer</button>
+                    <button id="stopTimerBtn" class="btn btn-danger hidden">Stop Timer</button>
+                </div>
+                
+                <form id="manualEntryForm">
+                    <div class="form-row">
+                        <div class="form-group">
+                            <label for="manualHours">Hours</label>
+                            <input type="number" id="manualHours" min="0" value="0" step="1">
+                        </div>
+                        <div class="form-group">
+                            <label for="manualMinutes">Minutes</label>
+                            <input type="number" id="manualMinutes" min="0" max="59" value="0" step="1">
+                        </div>
+                    </div>
+                    
+                    <div class="form-group">
+                        <label for="rewardRating">How Rewarding? (1-10)</label>
+                        <input type="range" id="rewardRating" min="1" max="10" value="5" step="1">
+                        <div class="rating-display" id="ratingDisplay">5</div>
+                    </div>
+                    
+                    <button type="submit" class="btn btn-primary">Save Entry</button>
+                </form>
+            </div>
+            
+            <!-- Session History -->
+            <div class="session-history">
+                <h3>Recent Sessions</h3>
+                <div id="sessionsList" class="sessions-list">
+                    <!-- Sessions will be loaded here -->
+                </div>
+            </div>
+            
+            <!-- Delete Activity Section -->
+            <div class="delete-section">
+                <button id="deleteActivityBtn" class="btn btn-danger" onclick="deleteActivity()">Delete Activity</button>
+            </div>
+        </div>
+        
+        <!-- Footer with Spreadsheet Link -->
+        <footer id="appFooter" class="app-footer hidden">
+            <a id="spreadsheetLink" href="#" target="_blank" rel="noopener noreferrer">
+                📊 View Data in Google Sheets
+            </a>
+        </footer>
+    </div>
+    
+    <script src="app.js"></script>
+    <script src="https://apis.google.com/js/api.js" onload="gapiLoaded()"></script>
+    <script src="https://accounts.google.com/gsi/client" onload="gisLoaded()"></script>
+</body>
+</html>

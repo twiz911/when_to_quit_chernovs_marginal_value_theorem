@@ -1,5 +1,7 @@
 Run from and data stored in andyhine@gmail.com Google Sheets and Cloud Console Google Sheets API access
 
+Runs from https://twiz911.github.io/when_to_quit_chernovs_marginal_value_theorem/index.html
+
 
 # Activity Tracker - Marginal Value Theorem
 

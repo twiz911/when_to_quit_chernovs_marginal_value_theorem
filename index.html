@@ -61,23 +61,56 @@
                 <!-- Origin Mismatch Instructions -->
                 <div id="originInstructions" class="origin-instructions hidden">
                     <h3>🔒 JavaScript Origin Not Authorized</h3>
-                    <p><strong>Your OAuth Client ID is not configured for this origin.</strong></p>
+                    <p><strong>Error 400: redirect_uri_mismatch</strong></p>
+                    <p>Your OAuth Client ID is not configured for this domain. You need to add this origin to your OAuth Client ID's authorized origins list.</p>
                     
                     <div class="browser-instructions">
                         <h4>How to Fix:</h4>
                         <ol>
                             <li>Go to: <a href="https://console.cloud.google.com/apis/credentials" target="_blank"><strong>Google Cloud Console - Credentials</strong></a></li>
-                            <li>Find your <strong>OAuth 2.0 Client ID</strong> and click the edit icon (pencil)</li>
+                            <li>Find your <strong>OAuth 2.0 Client ID</strong> (NOT the API Key) and click the edit icon (pencil)</li>
                             <li>Under <strong>"Authorized JavaScript origins"</strong>, click <strong>"+ ADD URI"</strong></li>
-                            <li>Add your current origin:
+                            <li>Add this exact origin (without /* at the end):
                                 <div class="code-box" id="currentOrigin"></div>
                             </li>
+                            <li>Click <strong>"SAVE"</strong></li>
+                            <li>Wait 1-2 minutes for changes to propagate, then refresh this page</li>
+                        </ol>
+                    </div>
+                    
+                    <div class="info-box">
+                        <strong>Note:</strong> This is different from the API Key restriction. You need BOTH configured:
+                        <ul>
+                            <li><strong>OAuth Client ID</strong> → Authorized JavaScript origins (no /*)</li>
+                            <li><strong>API Key</strong> → HTTP referrers (with /*)</li>
+                        </ul>
+                    </div>
+                    
+                    <p class="help-text">After adding the origin, click "Retry Connection" below.</p>
+                </div>
+                
+                <!-- API Key Referer Blocked Instructions -->
+                <div id="refererInstructions" class="referer-instructions hidden">
+                    <h3>🔑 API Key Referer Blocked</h3>
+                    <p><strong>Your API Key is not configured to allow requests from this domain.</strong></p>
+                    
+                    <div class="browser-instructions">
+                        <h4>How to Fix:</h4>
+                        <ol>
+                            <li>Go to: <a href="https://console.cloud.google.com/apis/credentials" target="_blank"><strong>Google Cloud Console - Credentials</strong></a></li>
+                            <li>Find your <strong>API Key</strong> (not OAuth Client ID) and click the edit icon (pencil)</li>
+                            <li>Under <strong>"Application restrictions"</strong>, select <strong>"HTTP referrers (web sites)"</strong></li>
+                            <li>Click <strong>"+ ADD AN ITEM"</strong></li>
+                            <li>Add your current domain with wildcard:
+                                <div class="code-box" id="currentReferer"></div>
+                            </li>
+                            <li>Under <strong>"API restrictions"</strong>, make sure <strong>"Google Sheets API"</strong> is selected</li>
                             <li>Click <strong>"SAVE"</strong></li>
                             <li>Wait 1-2 minutes for changes to propagate</li>
                         </ol>
                     </div>
                     
-                    <p class="help-text">After adding the origin, click "Retry Connection" below.</p>
+                    <p class="help-text">After adding the referer restriction, click "Retry Connection" below.</p>
                 </div>
                 
                 <!-- Test User Instructions -->
@@ -120,7 +153,24 @@
                             <ul>
                                 <li>Go to: <a href="https://console.cloud.google.com/apis/credentials/wizard?api=sheets.googleapis.com" target="_blank">Credentials Wizard</a></li>
                                 <li>Create <strong>API Key</strong> AND <strong>OAuth Client ID</strong></li>
-                                <li>For OAuth: choose "Web application" and add origin: <code id="setupOrigin"></code></li>
+                            </ul>
+                        </li>
+                        <li><strong>Configure OAuth Client ID:</strong>
+                            <ul>
+                                <li>Edit your <strong>OAuth 2.0 Client ID</strong> (click the pencil icon)</li>
+                                <li>Choose application type: <strong>"Web application"</strong></li>
+                                <li>Under <strong>"Authorized JavaScript origins"</strong>, click "+ ADD URI"</li>
+                                <li>Add: <code id="setupOrigin"></code> (without /* at the end)</li>
+                                <li>Click <strong>SAVE</strong></li>
+                            </ul>
+                        </li>
+                        <li><strong>Configure API Key Restrictions:</strong>
+                            <ul>
+                                <li>Edit your <strong>API Key</strong> (click the pencil icon)</li>
+                                <li>Under <strong>"Application restrictions"</strong>, select "HTTP referrers (web sites)"</li>
+                                <li>Click "+ ADD AN ITEM" and add: <code id="setupReferer"></code> (with /* at the end)</li>
+                                <li>Under <strong>"API restrictions"</strong>, select "Restrict key" and choose <strong>"Google Sheets API"</strong></li>
+                                <li>Click <strong>SAVE</strong></li>
                             </ul>
                         </li>
                         <li><strong>Add Test User:</strong>

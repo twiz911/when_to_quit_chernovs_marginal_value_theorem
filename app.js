@@ -32,11 +32,13 @@ function showError(message, errorType = 'general') {
     // Show specific instructions based on error type
     const popupInstructions = document.getElementById('popupInstructions');
     const originInstructions = document.getElementById('originInstructions');
+    const refererInstructions = document.getElementById('refererInstructions');
     const testUserInstructions = document.getElementById('testUserInstructions');
     
     // Hide all special instruction sections first
     if (popupInstructions) popupInstructions.classList.add('hidden');
     if (originInstructions) originInstructions.classList.add('hidden');
+    if (refererInstructions) refererInstructions.classList.add('hidden');
     if (testUserInstructions) testUserInstructions.classList.add('hidden');
     
     // Show appropriate instructions
@@ -44,6 +46,8 @@ function showError(message, errorType = 'general') {
         popupInstructions.classList.remove('hidden');
     } else if (errorType === 'origin' && originInstructions) {
         originInstructions.classList.remove('hidden');
+    } else if (errorType === 'referer' && refererInstructions) {
+        refererInstructions.classList.remove('hidden');
     } else if (errorType === 'testuser' && testUserInstructions) {
         testUserInstructions.classList.remove('hidden');
     }
@@ -105,10 +109,17 @@ async function initializeGapiClient() {
     } catch (error) {
         console.error('Error initializing GAPI client:', error);
         let errorMsg = error.message || error.result?.error?.message || 'Unknown error';
-        if (errorMsg.includes('has not been used') || errorMsg.includes('not enabled')) {
+        const errorCode = error.result?.error?.code || error.code;
+        
+        // Check for referer blocked error (403 from API Key restriction)
+        if (errorCode === 403 && (errorMsg.includes('referer') || errorMsg.includes('Requests from referer'))) {
+            showError('API Key restriction: Requests from this domain are blocked. Your API Key needs to allow this domain.', 'referer');
+        } else if (errorMsg.includes('has not been used') || errorMsg.includes('not enabled')) {
             errorMsg = 'Google Sheets API is not enabled in your project. Go to Google Cloud Console > APIs & Services > Library, search for "Google Sheets API" (not BigQuery or other APIs), and click Enable.';
+            showError('Failed to initialize Google Sheets API. Error: ' + errorMsg);
+        } else {
+            showError('Failed to initialize Google Sheets API. Error: ' + errorMsg);
         }
-        showError('Failed to initialize Google Sheets API. Error: ' + errorMsg);
     }
 }
 
@@ -124,13 +135,16 @@ function gisLoaded() {
             callback: '', // defined later
             error_callback: (error) => {
                 console.error('OAuth initialization error:', error);
-                const errorMsg = error.message || error.type || '';
+                const errorMsg = error.message || error.type || JSON.stringify(error) || '';
                 const errorLower = errorMsg.toLowerCase();
                 
-                if (errorLower.includes('popup') || errorLower.includes('blocked')) {
+                // Check for redirect_uri_mismatch or origin errors (400 errors)
+                if (errorLower.includes('redirect_uri') || errorLower.includes('redirect uri') || 
+                    errorLower.includes('400') || errorLower.includes('origin') || 
+                    errorLower.includes("doesn't comply")) {
+                    showError('OAuth Error: JavaScript origin not authorized for this domain. Your OAuth Client ID needs to be updated.', 'origin');
+                } else if (errorLower.includes('popup') || errorLower.includes('blocked')) {
                     showError('Browser blocked the sign-in popup window. Please allow popups for this site.', 'popup');
-                } else if (errorLower.includes('redirect_uri') || errorLower.includes('origin')) {
-                    showError('OAuth configuration error: JavaScript origin not authorized.', 'origin');
                 } else {
                     showError('OAuth error: ' + errorMsg);
                 }
@@ -176,8 +190,10 @@ async function initializeApp() {
                     const errorLower = errorDesc.toLowerCase();
                     
                     // Check for specific error types - OAuth errors take priority
-                    if (errorLower.includes('redirect_uri') || errorLower.includes('origin') || errorLower.includes('invalid') || errorLower.includes('400')) {
-                        showError('OAuth Error: The JavaScript origin is not authorized. Click below for instructions.', 'origin');
+                    if (errorLower.includes('redirect_uri') || errorLower.includes('redirect uri') || 
+                        errorLower.includes('origin') || errorLower.includes('invalid') || 
+                        errorLower.includes('400') || errorLower.includes("doesn't comply")) {
+                        showError('OAuth Error: JavaScript origin not authorized for this domain. The OAuth Client ID needs to include this domain in "Authorized JavaScript origins".', 'origin');
                     } else if (errorLower.includes('403') || errorLower.includes('access_denied') || errorLower.includes('access blocked') || errorLower.includes('verification process') || errorLower.includes('not completed') || errorLower.includes('test user')) {
                         showError('Access blocked: Your email needs to be added as a test user. Click below for instructions.', 'testuser');
                     } else if (errorLower.includes('popup')) {
@@ -269,7 +285,7 @@ async function setupSpreadsheet() {
         try {
             const response = await gapi.client.sheets.spreadsheets.create({
                 properties: {
-                    title: 'Activity Tracker - Marginal Value Theorem'
+                    title: 'when_to_quit_chernovs_marginal_value_theorem'
                 },
                 sheets: [
                     {
@@ -807,6 +823,8 @@ document.addEventListener('DOMContentLoaded', () => {
     // Set current origin for error messages
     const currentOriginEl = document.getElementById('currentOrigin');
     const setupOriginEl = document.getElementById('setupOrigin');
+    const currentRefererEl = document.getElementById('currentReferer');
+    const setupRefererEl = document.getElementById('setupReferer');
     const currentOrigin = window.location.origin;
     
     if (currentOriginEl) {
@@ -814,6 +832,12 @@ document.addEventListener('DOMContentLoaded', () => {
     }
     if (setupOriginEl) {
         setupOriginEl.textContent = currentOrigin;
+    }
+    if (currentRefererEl) {
+        currentRefererEl.textContent = currentOrigin + '/*';
+    }
+    if (setupRefererEl) {
+        setupRefererEl.textContent = currentOrigin + '/*';
     }
     
     // Set placeholder for test user email

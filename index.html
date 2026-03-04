@@ -22,8 +22,12 @@
                 
                 <div id="addActivityInline" class="add-activity-inline hidden">
                     <input type="text" id="activityNameInline" placeholder="Activity name..." />
-                    <button id="saveActivityBtn" class="btn btn-success btn-icon">✓</button>
-                    <button id="cancelActivityBtn" class="btn btn-secondary btn-icon">✕</button>
+                    <button id="saveActivityBtn" class="add-activity-icon-btn add-activity-icon-btn--save" type="button" aria-label="Save activity">
+                        <img class="add-activity-icon" src="check.svg" width="20" height="20" alt="">
+                    </button>
+                    <button id="cancelActivityBtn" class="add-activity-icon-btn add-activity-icon-btn--cancel" type="button" aria-label="Cancel">
+                        <img class="add-activity-icon" src="close.svg" width="20" height="20" alt="">
+                    </button>
                 </div>
             </div>
             
@@ -206,12 +210,12 @@
             
             <div class="activity-stats">
                 <div class="stat-card">
-                    <div class="stat-label">Average Score</div>
+                    <div class="stat-label">First 90% Score</div>
                     <div id="avgRewardTime" class="stat-value">--</div>
                     <div id="avgScoreNote" class="score-note hidden"></div>
                 </div>
                 <div class="stat-card">
-                    <div class="stat-label">Last Score</div>
+                    <div class="stat-label">Last 10% Score</div>
                     <div id="lastRewardTime" class="stat-value">--</div>
                     <div id="lastScoreNote" class="score-note hidden"></div>
                 </div>
@@ -221,7 +225,7 @@
                 <div class="warning-icon">⚠️</div>
                 <div class="warning-text">
                     <strong>Warning!</strong><br>
-                    Your last score is below the average.<br>
+                    Your last 10% of time scores below your first 90%.<br>
                     Consider switching activities.
                 </div>
             </div>

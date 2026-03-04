@@ -173,11 +173,29 @@ async function initializeApp() {
     try {
         // Try to restore token from localStorage
         const savedToken = localStorage.getItem('gapiToken');
+        let tokenValid = false;
+        
         if (savedToken) {
             try {
                 const token = JSON.parse(savedToken);
-                gapi.client.setToken(token);
-                console.log('Restored token from localStorage');
+                
+                // Check if token has expired (tokens include expires_in timestamp)
+                if (token.expires_at) {
+                    const now = Date.now();
+                    if (now < token.expires_at) {
+                        gapi.client.setToken(token);
+                        tokenValid = true;
+                        console.log('Restored valid token from localStorage');
+                    } else {
+                        console.log('Token expired, will request new one');
+                        localStorage.removeItem('gapiToken');
+                    }
+                } else {
+                    // Old token format without expiration, try to use it
+                    gapi.client.setToken(token);
+                    tokenValid = true;
+                    console.log('Restored token from localStorage (no expiration info)');
+                }
             } catch (e) {
                 console.warn('Failed to restore token:', e);
                 localStorage.removeItem('gapiToken');
@@ -185,7 +203,7 @@ async function initializeApp() {
         }
         
         // Check if we have a valid access token
-        if (gapi.client.getToken() === null) {
+        if (!tokenValid || gapi.client.getToken() === null) {
             // Prompt the user to select a Google account and ask for consent
             tokenClient.callback = async (resp) => {
                 if (resp.error !== undefined) {
@@ -208,11 +226,15 @@ async function initializeApp() {
                     return;
                 }
                 try {
-                    // Save token to localStorage
+                    // Save token to localStorage with expiration timestamp
                     const token = gapi.client.getToken();
                     if (token) {
+                        // Add expiration timestamp (expires_in is in seconds from now)
+                        if (token.expires_in) {
+                            token.expires_at = Date.now() + (token.expires_in * 1000);
+                        }
                         localStorage.setItem('gapiToken', JSON.stringify(token));
-                        console.log('Saved token to localStorage');
+                        console.log('Saved token to localStorage with expiration');
                     }
                     
                     await setupSpreadsheet();
@@ -396,20 +418,49 @@ async function loadActivities() {
             let lastScore = 0;
             
             if (activitySessions.length > 0) {
-                // Calculate average score (duration * rating for each session, then average)
-                // Use minimum of 60 minutes for score calculation (marginal value theorem)
-                const scores = activitySessions.map(s => {
-                    const duration = parseFloat(s[3]);
-                    const scoreMinutes = Math.max(duration, 60); // Round up to 60 if less than 1 hour
-                    return scoreMinutes * parseFloat(s[4]);
-                });
-                avgScore = scores.reduce((sum, score) => sum + score, 0) / scores.length;
+                // Calculate total minutes across all sessions
+                const totalMinutes = activitySessions.reduce((sum, s) => sum + parseFloat(s[3]), 0);
                 
-                // Get last session score
-                const lastSession = activitySessions[activitySessions.length - 1];
-                const lastDuration = parseFloat(lastSession[3]);
-                const lastScoreMinutes = Math.max(lastDuration, 60);
-                lastScore = lastScoreMinutes * parseFloat(lastSession[4]);
+                if (totalMinutes > 0) {
+                    const cutoffPoint = totalMinutes * 0.9; // 90% threshold
+                    let accumulatedMinutes = 0;
+                    let first90Score = 0;
+                    let first90ActualMinutes = 0;
+                    let last10Score = 0;
+                    let last10ActualMinutes = 0;
+                    
+                    // Process sessions chronologically, splitting at 90% mark
+                    activitySessions.forEach(s => {
+                        const duration = parseFloat(s[3]);
+                        const rating = parseFloat(s[4]);
+                        
+                        if (accumulatedMinutes + duration <= cutoffPoint) {
+                            // Entirely in first 90%
+                            first90Score += duration * rating;
+                            first90ActualMinutes += duration;
+                            accumulatedMinutes += duration;
+                        } else if (accumulatedMinutes >= cutoffPoint) {
+                            // Entirely in last 10%
+                            last10Score += duration * rating;
+                            last10ActualMinutes += duration;
+                            accumulatedMinutes += duration;
+                        } else {
+                            // Straddles the boundary - split this session
+                            const minutesInFirst90 = cutoffPoint - accumulatedMinutes;
+                            const minutesInLast10 = duration - minutesInFirst90;
+                            
+                            first90Score += minutesInFirst90 * rating;
+                            first90ActualMinutes += minutesInFirst90;
+                            last10Score += minutesInLast10 * rating;
+                            last10ActualMinutes += minutesInLast10;
+                            accumulatedMinutes += duration;
+                        }
+                    });
+                    
+                    // Calculate weighted averages (score per minute)
+                    avgScore = first90ActualMinutes > 0 ? first90Score / first90ActualMinutes : 0;
+                    lastScore = last10ActualMinutes > 0 ? last10Score / last10ActualMinutes : 0;
+                }
             }
             
             return {
@@ -449,11 +500,11 @@ async function loadActivities() {
                     </div>
                     <div class="activity-metrics">
                         <div class="metric">
-                            <div class="metric-label">Avg Score</div>
+                            <div class="metric-label">First 90%</div>
                             <div class="metric-value">${activity.sessionCount > 0 ? activity.avgRewardPerHour.toFixed(2) : '--'}</div>
                         </div>
                         <div class="metric">
-                            <div class="metric-label">Last Score</div>
+                            <div class="metric-label">Last 10%</div>
                             <div class="metric-value ${isBelowAverage ? 'below-average' : ''}">${activity.sessionCount > 0 ? activity.lastRewardPerHour.toFixed(2) : '--'}</div>
                         </div>
                     </div>
@@ -578,53 +629,80 @@ async function loadActivityDetail(activityId) {
         // Calculate metrics
         let avgScore = 0;
         let lastScore = 0;
-        let hasRoundedUpSessions = false;
+        let first90ActualMinutes = 0;
+        let last10ActualMinutes = 0;
         
         if (activitySessions.length > 0) {
-            // Calculate average score (duration * rating for each session, then average)
-            // Use minimum of 60 minutes for score calculation (marginal value theorem)
-            const scores = activitySessions.map(s => {
-                const duration = parseFloat(s[3]);
-                const rating = parseFloat(s[4]);
-                const scoreMinutes = Math.max(duration, 60); // Round up to 60 if less than 1 hour
-                if (duration < 60) hasRoundedUpSessions = true;
-                const score = scoreMinutes * rating;
-                return score;
-            });
-            avgScore = scores.reduce((sum, score) => sum + score, 0) / scores.length;
+            // Calculate total minutes across all sessions
+            const totalMinutes = activitySessions.reduce((sum, s) => sum + parseFloat(s[3]), 0);
             
-            // Get last session score
-            const lastSession = activitySessions[activitySessions.length - 1];
-            const lastDuration = parseFloat(lastSession[3]);
-            const lastScoreMinutes = Math.max(lastDuration, 60);
-            const lastWasRoundedUp = lastDuration < 60;
-            lastScore = lastScoreMinutes * parseFloat(lastSession[4]);
+            if (totalMinutes > 0) {
+                const cutoffPoint = totalMinutes * 0.9; // 90% threshold
+                let accumulatedMinutes = 0;
+                let first90Score = 0;
+                let last10Score = 0;
+                
+                // Process sessions chronologically, splitting at 90% mark
+                activitySessions.forEach(s => {
+                    const duration = parseFloat(s[3]);
+                    const rating = parseFloat(s[4]);
+                    
+                    if (accumulatedMinutes + duration <= cutoffPoint) {
+                        // Entirely in first 90%
+                        first90Score += duration * rating;
+                        first90ActualMinutes += duration;
+                        accumulatedMinutes += duration;
+                    } else if (accumulatedMinutes >= cutoffPoint) {
+                        // Entirely in last 10%
+                        last10Score += duration * rating;
+                        last10ActualMinutes += duration;
+                        accumulatedMinutes += duration;
+                    } else {
+                        // Straddles the boundary - split this session
+                        const minutesInFirst90 = cutoffPoint - accumulatedMinutes;
+                        const minutesInLast10 = duration - minutesInFirst90;
+                        
+                        first90Score += minutesInFirst90 * rating;
+                        first90ActualMinutes += minutesInFirst90;
+                        last10Score += minutesInLast10 * rating;
+                        last10ActualMinutes += minutesInLast10;
+                        accumulatedMinutes += duration;
+                    }
+                });
+                
+                // Calculate weighted averages (score per minute)
+                avgScore = first90ActualMinutes > 0 ? first90Score / first90ActualMinutes : 0;
+                lastScore = last10ActualMinutes > 0 ? last10Score / last10ActualMinutes : 0;
+            }
         }
         
         // Update UI
         document.getElementById('avgRewardTime').textContent = activitySessions.length > 0 ? avgScore.toFixed(2) : '--';
         document.getElementById('lastRewardTime').textContent = activitySessions.length > 0 ? lastScore.toFixed(2) : '--';
         
-        // Show score notes if sessions were rounded up
+        // Show score notes
         const avgScoreNote = document.getElementById('avgScoreNote');
         const lastScoreNote = document.getElementById('lastScoreNote');
         
-        if (hasRoundedUpSessions && activitySessions.length > 0) {
-            avgScoreNote.textContent = '(Some sessions < 1hr counted as 1hr)';
+        if (activitySessions.length > 0) {
+            // Format minutes as hours and minutes
+            const formatMinutes = (mins) => {
+                const hours = Math.floor(mins / 60);
+                const minutes = Math.round(mins % 60);
+                if (hours > 0) {
+                    return `${hours}h ${minutes}m`;
+                } else {
+                    return `${minutes}m`;
+                }
+            };
+            
+            avgScoreNote.textContent = `(First 90%: ${formatMinutes(first90ActualMinutes)}, time-weighted)`;
             avgScoreNote.classList.remove('hidden');
+            lastScoreNote.textContent = `(Last 10%: ${formatMinutes(last10ActualMinutes)}, time-weighted)`;
+            lastScoreNote.classList.remove('hidden');
         } else {
             avgScoreNote.classList.add('hidden');
-        }
-        
-        if (activitySessions.length > 0) {
-            const lastSession = activitySessions[activitySessions.length - 1];
-            const lastDuration = parseFloat(lastSession[3]);
-            if (lastDuration < 60) {
-                lastScoreNote.textContent = '(Session < 1hr counted as 1hr)';
-                lastScoreNote.classList.remove('hidden');
-            } else {
-                lastScoreNote.classList.add('hidden');
-            }
+            lastScoreNote.classList.add('hidden');
         }
         
         // Show warning if needed (but not if timer is running)
@@ -648,10 +726,7 @@ async function loadActivityDetail(activityId) {
             sessionsList.innerHTML = activitySessions.slice(-10).reverse().map((session, index) => {
                 const duration = parseFloat(session[3]);
                 const rating = parseFloat(session[4]);
-                // Use minimum of 60 minutes for score calculation (marginal value theorem)
-                const scoreMinutes = Math.max(duration, 60);
-                const score = scoreMinutes * rating;
-                const wasRoundedUp = duration < 60;
+                const score = duration * rating;
                 const hours = Math.floor(duration / 60);
                 const minutes = Math.round(duration % 60);
                 const durationText = hours > 0 ? `${hours}h ${minutes}m` : `${minutes}m`;
@@ -680,7 +755,7 @@ async function loadActivityDetail(activityId) {
                             <div class="session-reward">${rating}/10</div>
                             <div class="session-score">
                                 Score: ${score.toFixed(1)}
-                                ${wasRoundedUp ? '<br><span style="font-size: 0.7rem; opacity: 0.7; font-style: italic;"><1hr counted as 1hr</span>' : ''}
+                                <br><span style="font-size: 0.7rem; opacity: 0.7; font-style: italic;">(${duration} min × ${rating}/10)</span>
                             </div>
                         </div>
                     </div>

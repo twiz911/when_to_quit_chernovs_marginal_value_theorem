@@ -1,6 +1,6 @@
 // TODO SETUP Google Sheets API Configuration
 
-const API_KEY = 'AIzaSyDMLfR5FEwm8F4l2AZFB0xgHoM1PlTwEpM';        // Run from and data stored in andyhine@gmail.com Google Sheets and Cloud Console Google Sheets API access
+const API_KEY = 'AIzaSyDMLfR5FEwm8F4l2AZFB0xgHoM1PlTwEpM';        // Run from and data stored in a...h...@gmail.com Google Sheets and Cloud Console Google Sheets API access
 
 const CLIENT_ID = '198184405189-k0fgpof1g7u9tlkd332gdi7f9v627mgc.apps.googleusercontent.com';
 
@@ -243,6 +243,7 @@ async function initializeApp() {
                     
                     await setupSpreadsheet();
                     updateSpreadsheetLink();
+                    await loadTimersFromSheet();
                     await loadActivities();
                     isAuthenticated = true;
                     enableAppButtons();
@@ -280,6 +281,7 @@ async function initializeApp() {
         } else {
             await setupSpreadsheet();
             updateSpreadsheetLink();
+            await loadTimersFromSheet();
             await loadActivities();
             isAuthenticated = true;
             enableAppButtons();
@@ -374,6 +376,102 @@ async function setupSpreadsheet() {
             showError('Failed to create spreadsheet: ' + errorMsg);
             throw error;
         }
+    }
+    // Ensure Timers sheet exists (for both new and existing spreadsheets)
+    await ensureTimersSheet();
+}
+
+// Create the Timers sheet if it doesn't already exist
+async function ensureTimersSheet() {
+    try {
+        await gapi.client.sheets.spreadsheets.values.get({
+            spreadsheetId: spreadsheetId,
+            range: 'Timers!A1:C1',
+        });
+    } catch (e) {
+        // Sheet doesn't exist — create it
+        try {
+            await gapi.client.sheets.spreadsheets.batchUpdate({
+                spreadsheetId: spreadsheetId,
+                resource: { requests: [{ addSheet: { properties: { title: 'Timers' } } }] }
+            });
+            await gapi.client.sheets.spreadsheets.values.update({
+                spreadsheetId: spreadsheetId,
+                range: 'Timers!A1:C1',
+                valueInputOption: 'RAW',
+                resource: { values: [['Activity ID', 'Activity Name', 'Start Time']] }
+            });
+        } catch (err) {
+            console.warn('Could not create Timers sheet:', err);
+        }
+    }
+}
+
+// Write a running timer to the Timers sheet
+async function saveTimerToSheet(activityId, activityName, startTime) {
+    try {
+        await gapi.client.sheets.spreadsheets.values.append({
+            spreadsheetId: spreadsheetId,
+            range: 'Timers!A:C',
+            valueInputOption: 'RAW',
+            resource: { values: [[activityId, activityName, new Date(startTime).toISOString()]] }
+        });
+    } catch (e) {
+        console.warn('Could not save timer to sheet:', e);
+    }
+}
+
+// Delete a running timer row from the Timers sheet
+async function removeTimerFromSheet(activityId) {
+    try {
+        const resp = await gapi.client.sheets.spreadsheets.values.get({
+            spreadsheetId: spreadsheetId,
+            range: 'Timers!A:C',
+        });
+        const rows = resp.result.values || [];
+        // rows[0] is header; find data row index (1-based in sheet)
+        const rowIdx = rows.findIndex((r, i) => i > 0 && r[0] === activityId);
+        if (rowIdx === -1) return;
+        const meta = await gapi.client.sheets.spreadsheets.get({ spreadsheetId: spreadsheetId });
+        const timersSheet = meta.result.sheets.find(s => s.properties.title === 'Timers');
+        if (!timersSheet) return;
+        await gapi.client.sheets.spreadsheets.batchUpdate({
+            spreadsheetId: spreadsheetId,
+            resource: {
+                requests: [{ deleteDimension: { range: {
+                    sheetId: timersSheet.properties.sheetId,
+                    dimension: 'ROWS',
+                    startIndex: rowIdx,
+                    endIndex: rowIdx + 1
+                } } }]
+            }
+        });
+    } catch (e) {
+        console.warn('Could not remove timer from sheet:', e);
+    }
+}
+
+// Load running timers from the Timers sheet (cross-device sync)
+async function loadTimersFromSheet() {
+    try {
+        const resp = await gapi.client.sheets.spreadsheets.values.get({
+            spreadsheetId: spreadsheetId,
+            range: 'Timers!A2:C',
+        });
+        const rows = resp.result.values || [];
+        // Rebuild runningTimers from sheet data
+        Object.keys(runningTimers).forEach(k => delete runningTimers[k]);
+        rows.forEach(row => {
+            if (row[0]) {
+                runningTimers[row[0]] = {
+                    startTime: new Date(row[2]).getTime(),
+                    activityName: row[1] || ''
+                };
+            }
+        });
+        localStorage.setItem('runningTimers', JSON.stringify(runningTimers));
+    } catch (e) {
+        console.warn('Could not load timers from sheet:', e);
     }
 }
 
@@ -800,7 +898,7 @@ let timerState = {
     elapsed: 0
 };
 
-function startTimer() {
+async function startTimer() {
     if (!currentActivity) {
         showError('No activity selected');
         return;
@@ -821,6 +919,7 @@ function startTimer() {
         activityName: currentActivity.name
     };
     localStorage.setItem('runningTimers', JSON.stringify(runningTimers));
+    await saveTimerToSheet(currentActivity.id, currentActivity.name, timerState.startTime);
     
     document.getElementById('startTimerBtn').classList.add('hidden');
     document.getElementById('stopTimerBtn').classList.remove('hidden');
@@ -828,7 +927,7 @@ function startTimer() {
     timerInterval = setInterval(updateTimerDisplay, 100);
 }
 
-function stopTimer() {
+async function stopTimer() {
     timerState.running = false;
     
     // Clear the interval and set to null
@@ -849,6 +948,7 @@ function stopTimer() {
     if (currentActivity) {
         delete runningTimers[currentActivity.id];
         localStorage.setItem('runningTimers', JSON.stringify(runningTimers));
+        await removeTimerFromSheet(currentActivity.id);
     }
     
     // Reset timer display and state
@@ -1115,20 +1215,21 @@ function updateRunningTimerDisplays() {
 }
 
 // Start timer from activity card on main screen
-function startTimerFromCard(activityId, activityName) {
-    // Save to running timers
+async function startTimerFromCard(activityId, activityName) {
+    const startTime = Date.now();
     runningTimers[activityId] = {
-        startTime: Date.now(),
+        startTime: startTime,
         activityName: activityName
     };
     localStorage.setItem('runningTimers', JSON.stringify(runningTimers));
+    await saveTimerToSheet(activityId, activityName, startTime);
     
     // Refresh activities list to show timer
     loadActivities();
 }
 
 // Stop timer from activity card on main screen
-function stopTimerFromCard(activityId, activityName) {
+async function stopTimerFromCard(activityId, activityName) {
     // Calculate elapsed time before removing from running timers
     const timerData = runningTimers[activityId];
     if (!timerData) {
@@ -1142,6 +1243,7 @@ function stopTimerFromCard(activityId, activityName) {
     // Remove from running timers
     delete runningTimers[activityId];
     localStorage.setItem('runningTimers', JSON.stringify(runningTimers));
+    await removeTimerFromSheet(activityId);
     
     // Refresh activities list
     loadActivities();

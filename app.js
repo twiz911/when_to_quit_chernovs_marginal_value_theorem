@@ -607,6 +607,9 @@ async function loadActivities() {
             // Only flag below-average if a declining split covers >= WARNING_THRESHOLD_PERCENT of total time
             const isBelowAverage = !hasRunningTimer && activity.sessionCount > 0 && activity.splitResult !== null
                 && activity.splitResult.recentPercent >= WARNING_THRESHOLD_PERCENT;
+            // Red number matches detail screen: no timer restriction
+            const isRecentRed = activity.sessionCount > 0 && activity.splitResult !== null
+                && activity.splitResult.recentPercent >= WARNING_THRESHOLD_PERCENT;
             const initialLabel = activity.splitResult
                 ? `Initial ${Math.round(activity.splitResult.initialPercent)}% Average`
                 : 'Average';
@@ -641,7 +644,7 @@ async function loadActivities() {
                         </div>
                         <div class="metric">
                             <div class="metric-label">${recentLabel}</div>
-                            <div class="metric-value ${isBelowAverage ? 'below-average' : ''}">${activity.splitResult ? activity.lastRewardPerHour.toFixed(2) : (activity.sessionCount > 0 ? '✓' : '--')}</div>
+                            <div class="metric-value ${isRecentRed ? 'below-average' : ''}">${activity.splitResult ? activity.lastRewardPerHour.toFixed(2) : (activity.sessionCount > 0 ? '✓' : '--')}</div>
                         </div>
                     </div>
                 </div>

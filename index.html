@@ -207,28 +207,32 @@
                 <button class="btn-back" onclick="showPage('homePage')">← Back</button>
                 <h2 id="activityTitle">Activity</h2>
             </header>
+
+            <br/>
+
+            <div id="warningBox" class="warning-box hidden">
+                <div class="warning-icon">⚠️</div>
+                <div id="warningText" class="warning-text">
+                    <strong>Warning!</strong><br>
+                    Your recent sessions score below your earlier average.<br>
+                    Consider switching activities.
+                </div>
+            </div>
             
             <div class="activity-stats">
                 <div class="stat-card">
-                    <div class="stat-label">First 90% Score</div>
+                    <div id="avgScoreLabel" class="stat-label">Initial Rating</div>
                     <div id="avgRewardTime" class="stat-value">--</div>
                     <div id="avgScoreNote" class="score-note hidden"></div>
                 </div>
                 <div class="stat-card">
-                    <div class="stat-label">Last 10% Score</div>
+                    <div id="lastScoreLabel" class="stat-label">Most Recent Rating</div>
                     <div id="lastRewardTime" class="stat-value">--</div>
                     <div id="lastScoreNote" class="score-note hidden"></div>
                 </div>
             </div>
-            
-            <div id="warningBox" class="warning-box hidden">
-                <div class="warning-icon">⚠️</div>
-                <div class="warning-text">
-                    <strong>Warning!</strong><br>
-                    Your last 10% of time scores below your first 90%.<br>
-                    Consider switching activities.
-                </div>
-            </div>
+
+
             
             <!-- Timer Section -->
             <div class="timer-section">
@@ -285,7 +289,7 @@
         </footer>
     </div>
     
-    <script src="app.js"></script>
+    <script src="app.js?v=7"></script>
     <script src="https://apis.google.com/js/api.js" onload="gapiLoaded()"></script>
     <script src="https://accounts.google.com/gsi/client" onload="gisLoaded()"></script>
 </body>

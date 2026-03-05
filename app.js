@@ -11,6 +11,10 @@ const SPREADSHEET_ID = '1UYVZMilFCtTNoFimamdNYkGXRcw-N72GiQyckBEGv_c';
 
 /*******************************************************************/
 
+// Only show the "consider quitting" warning when the declining recent
+// portion covers at least this percentage of total time.
+const WARNING_THRESHOLD_PERCENT = 20;
+
 const DISCOVERY_DOCS = ['https://sheets.googleapis.com/$discovery/rest?version=v4'];
 const SCOPES = 'https://www.googleapis.com/auth/spreadsheets';
 
@@ -373,6 +377,56 @@ async function setupSpreadsheet() {
     }
 }
 
+// Find the maximum most-recent time percentage where recent avg < initial avg.
+// Scans session boundaries and returns the split with the largest "recent" portion
+// that still has a lower average than the initial portion.
+// Returns { initialAvg, recentAvg, initialMins, recentMins, initialPercent, recentPercent }
+// or null if no decline is found.
+function findOptimalSplit(sessions) {
+    if (sessions.length < 2) return null;
+
+    const totalMinutes = sessions.reduce((sum, s) => sum + parseFloat(s[3]), 0);
+    if (totalMinutes === 0) return null;
+
+    const totalScore = sessions.reduce((sum, s) => sum + parseFloat(s[3]) * parseFloat(s[4]), 0);
+
+    let bestResult = null;
+
+    // Accumulate the "initial" bucket left-to-right, checking each boundary.
+    // sessions 0..splitAfter = initial, sessions splitAfter+1..end = recent.
+    let initialMins = 0, initialScore = 0;
+    for (let splitAfter = 0; splitAfter < sessions.length - 1; splitAfter++) {
+        const d = parseFloat(sessions[splitAfter][3]);
+        const r = parseFloat(sessions[splitAfter][4]);
+        initialMins += d;
+        initialScore += d * r;
+
+        const recentMins = totalMinutes - initialMins;
+        const recentScore = totalScore - initialScore;
+
+        if (initialMins > 0 && recentMins > 0) {
+            const initialAvg = initialScore / initialMins;
+            const recentAvg = recentScore / recentMins;
+
+            if (recentAvg < initialAvg) {
+                const recentPercent = (recentMins / totalMinutes) * 100;
+                if (!bestResult || recentPercent > bestResult.recentPercent) {
+                    bestResult = {
+                        initialAvg,
+                        recentAvg,
+                        initialMins,
+                        recentMins,
+                        recentPercent,
+                        initialPercent: 100 - recentPercent
+                    };
+                }
+            }
+        }
+    }
+
+    return bestResult;
+}
+
 // Load Activities
 async function loadActivities() {
     const loadingIndicator = document.getElementById('loadingIndicator');
@@ -416,67 +470,51 @@ async function loadActivities() {
             
             let avgScore = 0;
             let lastScore = 0;
-            
+            let splitResult = null;
+
             if (activitySessions.length > 0) {
-                // Calculate total minutes across all sessions
-                const totalMinutes = activitySessions.reduce((sum, s) => sum + parseFloat(s[3]), 0);
-                
-                if (totalMinutes > 0) {
-                    const cutoffPoint = totalMinutes * 0.9; // 90% threshold
-                    let accumulatedMinutes = 0;
-                    let first90Score = 0;
-                    let first90ActualMinutes = 0;
-                    let last10Score = 0;
-                    let last10ActualMinutes = 0;
-                    
-                    // Process sessions chronologically, splitting at 90% mark
-                    activitySessions.forEach(s => {
-                        const duration = parseFloat(s[3]);
-                        const rating = parseFloat(s[4]);
-                        
-                        if (accumulatedMinutes + duration <= cutoffPoint) {
-                            // Entirely in first 90%
-                            first90Score += duration * rating;
-                            first90ActualMinutes += duration;
-                            accumulatedMinutes += duration;
-                        } else if (accumulatedMinutes >= cutoffPoint) {
-                            // Entirely in last 10%
-                            last10Score += duration * rating;
-                            last10ActualMinutes += duration;
-                            accumulatedMinutes += duration;
-                        } else {
-                            // Straddles the boundary - split this session
-                            const minutesInFirst90 = cutoffPoint - accumulatedMinutes;
-                            const minutesInLast10 = duration - minutesInFirst90;
-                            
-                            first90Score += minutesInFirst90 * rating;
-                            first90ActualMinutes += minutesInFirst90;
-                            last10Score += minutesInLast10 * rating;
-                            last10ActualMinutes += minutesInLast10;
-                            accumulatedMinutes += duration;
-                        }
-                    });
-                    
-                    // Calculate weighted averages (score per minute)
-                    avgScore = first90ActualMinutes > 0 ? first90Score / first90ActualMinutes : 0;
-                    lastScore = last10ActualMinutes > 0 ? last10Score / last10ActualMinutes : 0;
+                splitResult = findOptimalSplit(activitySessions);
+                if (splitResult) {
+                    avgScore = splitResult.initialAvg;
+                    lastScore = splitResult.recentAvg;
+                } else {
+                    // No decline — compute overall average
+                    const totalMins = activitySessions.reduce((sum, s) => sum + parseFloat(s[3]), 0);
+                    const totalSc = activitySessions.reduce((sum, s) => sum + parseFloat(s[3]) * parseFloat(s[4]), 0);
+                    avgScore = totalMins > 0 ? totalSc / totalMins : 0;
                 }
             }
-            
+
             return {
                 id: activityId,
                 name: activityName,
                 avgRewardPerHour: parseFloat(avgScore.toFixed(2)),
                 lastRewardPerHour: parseFloat(lastScore.toFixed(2)),
-                sessionCount: activitySessions.length
+                sessionCount: activitySessions.length,
+                splitResult
             };
         });
         
+        // Sort: running timers first, then alphabetically by name
+        activityMetrics.sort((a, b) => {
+            const aRunning = !!runningTimers[a.id];
+            const bRunning = !!runningTimers[b.id];
+            if (aRunning !== bRunning) return aRunning ? -1 : 1;
+            return a.name.localeCompare(b.name);
+        });
+
         // Render activities
         activitiesList.innerHTML = activityMetrics.map(activity => {
             const hasRunningTimer = runningTimers[activity.id];
-            // Don't show below average warning if timer is running
-            const isBelowAverage = !hasRunningTimer && activity.sessionCount > 0 && activity.lastRewardPerHour < activity.avgRewardPerHour;
+            // Only flag below-average if a declining split covers >= WARNING_THRESHOLD_PERCENT of total time
+            const isBelowAverage = !hasRunningTimer && activity.sessionCount > 0 && activity.splitResult !== null
+                && activity.splitResult.recentPercent >= WARNING_THRESHOLD_PERCENT;
+            const initialLabel = activity.splitResult
+                ? `Initial ${Math.round(activity.splitResult.initialPercent)}% Average`
+                : 'Average';
+            const recentLabel = activity.splitResult
+                ? `Most Recent ${Math.round(activity.splitResult.recentPercent)}% Average`
+                : 'Most Recent';
             let timerDisplay = '';
             
             if (hasRunningTimer) {
@@ -500,12 +538,12 @@ async function loadActivities() {
                     </div>
                     <div class="activity-metrics">
                         <div class="metric">
-                            <div class="metric-label">First 90%</div>
+                            <div class="metric-label">${initialLabel}</div>
                             <div class="metric-value">${activity.sessionCount > 0 ? activity.avgRewardPerHour.toFixed(2) : '--'}</div>
                         </div>
                         <div class="metric">
-                            <div class="metric-label">Last 10%</div>
-                            <div class="metric-value ${isBelowAverage ? 'below-average' : ''}">${activity.sessionCount > 0 ? activity.lastRewardPerHour.toFixed(2) : '--'}</div>
+                            <div class="metric-label">${recentLabel}</div>
+                            <div class="metric-value ${isBelowAverage ? 'below-average' : ''}">${activity.splitResult ? activity.lastRewardPerHour.toFixed(2) : (activity.sessionCount > 0 ? '✓' : '--')}</div>
                         </div>
                     </div>
                 </div>
@@ -626,92 +664,84 @@ async function loadActivityDetail(activityId) {
         const allSessions = sessionsResponse.result.values || [];
         const activitySessions = allSessions.filter(s => s[1] === activityId);
         
-        // Calculate metrics
+        // Calculate metrics using optimal split
         let avgScore = 0;
         let lastScore = 0;
-        let first90ActualMinutes = 0;
-        let last10ActualMinutes = 0;
-        
+        let splitResult = null;
+
         if (activitySessions.length > 0) {
-            // Calculate total minutes across all sessions
-            const totalMinutes = activitySessions.reduce((sum, s) => sum + parseFloat(s[3]), 0);
-            
-            if (totalMinutes > 0) {
-                const cutoffPoint = totalMinutes * 0.9; // 90% threshold
-                let accumulatedMinutes = 0;
-                let first90Score = 0;
-                let last10Score = 0;
-                
-                // Process sessions chronologically, splitting at 90% mark
-                activitySessions.forEach(s => {
-                    const duration = parseFloat(s[3]);
-                    const rating = parseFloat(s[4]);
-                    
-                    if (accumulatedMinutes + duration <= cutoffPoint) {
-                        // Entirely in first 90%
-                        first90Score += duration * rating;
-                        first90ActualMinutes += duration;
-                        accumulatedMinutes += duration;
-                    } else if (accumulatedMinutes >= cutoffPoint) {
-                        // Entirely in last 10%
-                        last10Score += duration * rating;
-                        last10ActualMinutes += duration;
-                        accumulatedMinutes += duration;
-                    } else {
-                        // Straddles the boundary - split this session
-                        const minutesInFirst90 = cutoffPoint - accumulatedMinutes;
-                        const minutesInLast10 = duration - minutesInFirst90;
-                        
-                        first90Score += minutesInFirst90 * rating;
-                        first90ActualMinutes += minutesInFirst90;
-                        last10Score += minutesInLast10 * rating;
-                        last10ActualMinutes += minutesInLast10;
-                        accumulatedMinutes += duration;
-                    }
-                });
-                
-                // Calculate weighted averages (score per minute)
-                avgScore = first90ActualMinutes > 0 ? first90Score / first90ActualMinutes : 0;
-                lastScore = last10ActualMinutes > 0 ? last10Score / last10ActualMinutes : 0;
+            splitResult = findOptimalSplit(activitySessions);
+            if (splitResult) {
+                avgScore = splitResult.initialAvg;
+                lastScore = splitResult.recentAvg;
+            } else {
+                // No decline — compute overall average
+                const totalMins = activitySessions.reduce((sum, s) => sum + parseFloat(s[3]), 0);
+                const totalSc = activitySessions.reduce((sum, s) => sum + parseFloat(s[3]) * parseFloat(s[4]), 0);
+                avgScore = totalMins > 0 ? totalSc / totalMins : 0;
             }
         }
-        
-        // Update UI
+
+        // Format minutes helper
+        const formatMinutes = (mins) => {
+            const hours = Math.floor(mins / 60);
+            const minutes = Math.round(mins % 60);
+            return hours > 0 ? `${hours}h ${minutes}m` : `${minutes}m`;
+        };
+
+        // Update stat labels dynamically
+        const avgScoreLabel = document.getElementById('avgScoreLabel');
+        const lastScoreLabel = document.getElementById('lastScoreLabel');
+        if (splitResult) {
+            const ip = Math.round(splitResult.initialPercent);
+            const rp = Math.round(splitResult.recentPercent);
+            if (avgScoreLabel) avgScoreLabel.textContent = `Initial ${ip}% Average`;
+            if (lastScoreLabel) lastScoreLabel.textContent = `Most Recent ${rp}% Average`;
+        } else {
+            if (avgScoreLabel) avgScoreLabel.textContent = 'Average Rating';
+            if (lastScoreLabel) lastScoreLabel.textContent = 'Trend';
+        }
+
+        // Update UI values
         document.getElementById('avgRewardTime').textContent = activitySessions.length > 0 ? avgScore.toFixed(2) : '--';
-        document.getElementById('lastRewardTime').textContent = activitySessions.length > 0 ? lastScore.toFixed(2) : '--';
-        
+        const lastRewardTimeEl = document.getElementById('lastRewardTime');
+        lastRewardTimeEl.textContent = activitySessions.length > 0 && splitResult ? lastScore.toFixed(2) : (activitySessions.length > 0 ? '✓' : '--');
+        const showWarning = splitResult && splitResult.recentPercent >= WARNING_THRESHOLD_PERCENT;
+        lastRewardTimeEl.style.color = showWarning ? 'var(--danger-color, #e53e3e)' : '';
+
         // Show score notes
         const avgScoreNote = document.getElementById('avgScoreNote');
         const lastScoreNote = document.getElementById('lastScoreNote');
-        
-        if (activitySessions.length > 0) {
-            // Format minutes as hours and minutes
-            const formatMinutes = (mins) => {
-                const hours = Math.floor(mins / 60);
-                const minutes = Math.round(mins % 60);
-                if (hours > 0) {
-                    return `${hours}h ${minutes}m`;
-                } else {
-                    return `${minutes}m`;
-                }
-            };
-            
-            avgScoreNote.textContent = `(First 90%: ${formatMinutes(first90ActualMinutes)}, time-weighted)`;
+
+        if (activitySessions.length > 0 && splitResult) {
+            avgScoreNote.textContent = `Average rating over initial ${Math.round(splitResult.initialPercent)}% (${formatMinutes(splitResult.initialMins)}) of time`;
             avgScoreNote.classList.remove('hidden');
-            lastScoreNote.textContent = `(Last 10%: ${formatMinutes(last10ActualMinutes)}, time-weighted)`;
+            lastScoreNote.textContent = `Average rating over most recent ${Math.round(splitResult.recentPercent)}% (${formatMinutes(splitResult.recentMins)}) of time`;
+            lastScoreNote.classList.remove('hidden');
+        } else if (activitySessions.length > 0) {
+            const totalMins = activitySessions.reduce((sum, s) => sum + parseFloat(s[3]), 0);
+            avgScoreNote.textContent = `Average rating over all time (${formatMinutes(totalMins)})`;
+            avgScoreNote.classList.remove('hidden');
+            lastScoreNote.textContent = 'No recent decline in rating detected';
             lastScoreNote.classList.remove('hidden');
         } else {
             avgScoreNote.classList.add('hidden');
             lastScoreNote.classList.add('hidden');
         }
-        
+
         // Show warning if needed (but not if timer is running)
         const warningBox = document.getElementById('warningBox');
+        const warningText = document.getElementById('warningText');
         const isTimerRunning = runningTimers[activityId];
-        if (!isTimerRunning && activitySessions.length > 0 && lastScore < avgScore) {
-            warningBox.classList.remove('hidden');
+        if (!isTimerRunning && splitResult && splitResult.recentPercent >= WARNING_THRESHOLD_PERCENT) {
+            const ip = Math.round(splitResult.initialPercent);
+            const rp = Math.round(splitResult.recentPercent);
+            if (warningText) {
+                warningText.innerHTML = `<strong>Warning!</strong><br>Your most recent ${rp}% of time (${formatMinutes(splitResult.recentMins)}) average rating ${lastScore.toFixed(2)} is below your initial ${ip}% (${formatMinutes(splitResult.initialMins)}) average rating ${avgScore.toFixed(2)}.<br>Consider switching activities.`;
+            }
+            if (warningBox) warningBox.classList.remove('hidden');
         } else {
-            warningBox.classList.add('hidden');
+            if (warningBox) warningBox.classList.add('hidden');
         }
         
         // Load sessions list
@@ -723,30 +753,21 @@ async function loadActivityDetail(activityId) {
                 </div>
             `;
         } else {
-            sessionsList.innerHTML = activitySessions.slice(-10).reverse().map((session, index) => {
+            const rows = activitySessions.slice(-10).reverse();
+            sessionsList.innerHTML = rows.map((session) => {
                 const duration = parseFloat(session[3]);
                 const rating = parseFloat(session[4]);
                 const score = duration * rating;
                 const hours = Math.floor(duration / 60);
                 const minutes = Math.round(duration % 60);
                 const durationText = hours > 0 ? `${hours}h ${minutes}m` : `${minutes}m`;
-                const date = new Date(session[2]);
-                // Format date as YYYY-MM-DD HH:MM
-                const year = date.getFullYear();
-                const month = String(date.getMonth() + 1).padStart(2, '0');
-                const day = String(date.getDate()).padStart(2, '0');
-                const hours24 = String(date.getHours()).padStart(2, '0');
-                const mins = String(date.getMinutes()).padStart(2, '0');
-                const dateText = `${year}-${month}-${day} ${hours24}:${mins}`;
-                
-                // Highlight most recent session if below average (but not if timer is running)
-                const isMostRecent = index === 0;
-                const isTimerRunning = runningTimers[activityId];
-                const isBelowAvg = !isTimerRunning && isMostRecent && lastScore < avgScore && activitySessions.length > 1;
+                const dateRaw = session[2] ? new Date(session[2]) : null;
+                const dateText = dateRaw && !isNaN(dateRaw)
+                    ? `${dateRaw.getFullYear()}-${String(dateRaw.getMonth()+1).padStart(2,'0')}-${String(dateRaw.getDate()).padStart(2,'0')} ${String(dateRaw.getHours()).padStart(2,'0')}:${String(dateRaw.getMinutes()).padStart(2,'0')}`
+                    : (session[2] || '');
                 
                 return `
-                    <div class="session-item ${isBelowAvg ? 'below-average-session' : ''}">
-                        ${isBelowAvg ? '<div class="session-warning">⚠️ Below Average</div>' : ''}
+                    <div class="session-item">
                         <div class="session-info">
                             <div class="session-time">${durationText}</div>
                             <div class="session-date">${dateText}</div>
@@ -765,6 +786,10 @@ async function loadActivityDetail(activityId) {
         
     } catch (error) {
         console.error('Error loading activity detail:', error);
+        const sessionsList = document.getElementById('sessionsList');
+        if (sessionsList) {
+            sessionsList.innerHTML = `<div class="empty-state"><div class="empty-state-text">Error loading sessions: ${error.message}</div></div>`;
+        }
     }
 }
 

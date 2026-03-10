@@ -61,6 +61,7 @@ function showError(message, errorType = 'general') {
     }
     
     errorModal.classList.remove('hidden');
+    errorShown = true;
     
     // Hide loading indicator
     const loadingIndicator = document.getElementById('loadingIndicator');
@@ -230,6 +231,7 @@ async function initializeApp() {
                     return;
                 }
                 try {
+                    hideError(); // Dismiss any stale error shown while waiting for auth
                     // Save token to localStorage with expiration timestamp
                     const token = gapi.client.getToken();
                     if (token) {
@@ -257,14 +259,14 @@ async function initializeApp() {
                 // Request access token with popup (empty prompt = only show if needed)
                 tokenClient.requestAccessToken({ prompt: '' });
                 
-                // Check after a delay if auth didn't complete and no error was shown
+                // Check after a delay if auth didn't complete and no error was shown.
+                // Use 30s to allow time for mobile auth flows (redirect-based or slow popup).
                 setTimeout(() => {
                     if (!isAuthenticated && !errorShown) {
-                        // Only show popup-blocked if no other error has been displayed
-                        console.log('Authentication timed out, checking for popup block');
-                        showError('Sign-in did not complete. If you saw an error in the popup, check the instructions below.', 'origin');
+                        console.log('Authentication timed out');
+                        showError('Sign-in did not complete. If a sign-in popup appeared, make sure to select your account. Then click "Retry Connection" below.', 'popup');
                     }
-                }, 5000);
+                }, 30000);
             } catch (error) {
                 console.error('Error requesting access token:', error);
                 const errorMsg = error.message || error.toString();

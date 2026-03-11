@@ -510,7 +510,7 @@ function findOptimalSplit(sessions) {
 
             if (recentAvg < initialAvg) {
                 const recentPercent = (recentMins / totalMinutes) * 100;
-                if (!bestResult || recentPercent > bestResult.recentPercent) {
+                if (recentPercent <= 50 && (!bestResult || recentPercent > bestResult.recentPercent)) {
                     bestResult = {
                         initialAvg,
                         recentAvg,
@@ -726,6 +726,7 @@ async function openActivity(activityId, activityName) {
     
     document.getElementById('activityTitle').textContent = activityName;
     showPage('activityDetailPage');
+    window.scrollTo(0, 0);
     
     // Clear any existing timer interval first
     if (timerInterval) {
@@ -840,7 +841,8 @@ async function loadActivityDetail(activityId) {
             const ip = Math.round(splitResult.initialPercent);
             const rp = Math.round(splitResult.recentPercent);
             if (warningText) {
-                warningText.innerHTML = `<strong>Warning!</strong><br>Your most recent ${rp}% of time (${formatMinutes(splitResult.recentMins)}) average rating ${lastScore.toFixed(2)} is below your initial ${ip}% (${formatMinutes(splitResult.initialMins)}) average rating ${avgScore.toFixed(2)}.<br>Consider switching activities.`;
+                const pctBelow = Math.round((avgScore - lastScore) / avgScore * 100);
+                warningText.innerHTML = `<strong>Warning!</strong><br>Your most recent ${rp}% of time (${formatMinutes(splitResult.recentMins)}) average rating ${lastScore.toFixed(2)} is ${pctBelow}% below your initial ${ip}% time (${formatMinutes(splitResult.initialMins)}) average rating ${avgScore.toFixed(2)}.<br>Consider switching activities.`;
             }
             if (warningBox) warningBox.classList.remove('hidden');
         } else {

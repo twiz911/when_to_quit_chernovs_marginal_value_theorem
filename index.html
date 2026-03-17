@@ -7,6 +7,27 @@
     <meta name="mobile-web-app-capable" content="yes">
     <title>When To Quit - Marginal Value Theorem</title>
     <link rel="stylesheet" href="styles.css">
+    <script>
+    // Must run before any Google script loads.
+    // GIS (accounts.google.com/gsi/client) reads navigator.userAgent in JavaScript
+    // and refuses to initialise google.accounts when it sees the Android WebView
+    // marker "; wv)". Overriding it here at the JS level overrides what GIS reads.
+    (function () {
+        try {
+            var ua = navigator.userAgent;
+            if (ua.indexOf('; wv)') !== -1 || ua.indexOf(' wv)') !== -1) {
+                Object.defineProperty(navigator, 'userAgent', {
+                    get: function () {
+                        return ua.replace('; wv)', ')').replace(' wv)', ')');
+                    },
+                    configurable: true
+                });
+            }
+        } catch (e) {
+            // read-only in some environments – safe to ignore
+        }
+    })();
+    </script>
 </head>
 <body>
     <div id="app">
@@ -281,6 +302,26 @@
             </div>
         </div>
         
+        <!-- Quick-Rate Modal (opened from Android "Stop & Rate" notification) -->
+        <div id="quickRateModal" class="modal hidden">
+            <div class="modal-content">
+                <h2>Stop &amp; Rate</h2>
+                <p id="quickRateActivityName" style="font-weight:bold;font-size:1.1em;margin-bottom:0.3em"></p>
+                <p id="quickRateDuration" style="color:#666;margin-bottom:1.4em;font-size:0.95em"></p>
+                <div class="form-group">
+                    <label for="quickRateSlider">How Rewarding? (1-10)</label>
+                    <input type="range" id="quickRateSlider" min="1" max="10" value="5" step="1"
+                        oninput="document.getElementById('quickRateValue').textContent=this.value">
+                    <div class="rating-display" id="quickRateValue">5</div>
+                </div>
+                <button class="btn btn-primary" onclick="quickRateSaveOnly()" style="width:100%;margin-bottom:1.5em">
+                    Save &amp; Go Home
+                </button>
+                <h3 style="margin-bottom:0.6em">Start next activity?</h3>
+                <div id="quickRateActivityList" style="display:flex;flex-direction:column;gap:0.5em"></div>
+            </div>
+        </div>
+
         <!-- Footer with Spreadsheet Link -->
         <footer id="appFooter" class="app-footer hidden">
             <a id="spreadsheetLink" href="#" target="_blank" rel="noopener noreferrer">
@@ -290,7 +331,7 @@
     </div>
     
     <script src="app.js?v=9"></script>
-    <script src="https://apis.google.com/js/api.js" onload="gapiLoaded()"></script>
-    <script src="https://accounts.google.com/gsi/client" onload="gisLoaded()"></script>
+    <script src="https://apis.google.com/js/api.js" onload="gapiLoaded()" onerror="showError('Google API library (apis.google.com) failed to load. Check network connection.')"></script>
+    <script src="https://accounts.google.com/gsi/client" onload="gisLoaded()" onerror="showError('GIS script (accounts.google.com/gsi/client) failed to download. Check network connection.')"></script>
 </body>
 </html>

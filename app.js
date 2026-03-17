@@ -31,6 +31,51 @@ let isAuthenticated = false; // Track if user is authenticated and ready
 let errorShown = false; // Track if error modal already shown
 let runningTimers = JSON.parse(localStorage.getItem('runningTimers')) || {}; // { activityId: { startTime, elapsed, activityName } }
 
+// ─── Capacitor native bridge (graceful no-op in browser) ─────────────────────
+const TimerPlugin = (() => {
+    try { return window.Capacitor?.Plugins?.TimerPlugin || null; } catch (e) { return null; }
+})();
+
+async function notifyNativeTimerStart(activityId, activityName, startTime) {
+    if (!TimerPlugin) return;
+    try { await TimerPlugin.startService({ activityId, activityName, startTime }); }
+    catch (e) { console.warn('TimerPlugin.startService:', e); }
+}
+
+async function notifyNativeTimerStop() {
+    if (!TimerPlugin) return;
+    try { await TimerPlugin.stopService(); }
+    catch (e) { console.warn('TimerPlugin.stopService:', e); }
+}
+
+async function syncActivitiesToNative(activities) {
+    if (!TimerPlugin) return;
+    try { await TimerPlugin.syncActivities({ activities }); }
+    catch (e) { console.warn('TimerPlugin.syncActivities:', e); }
+}
+
+async function checkNativeLaunchIntent() {
+    if (!TimerPlugin) return;
+    try {
+        const result = await TimerPlugin.getIntentAction();
+        if (result.action === 'STOP_AND_RATE') {
+            showQuickRateModal(result.activityId, result.activityName, parseInt(result.startTime));
+        }
+    } catch (e) { console.warn('TimerPlugin.getIntentAction:', e); }
+}
+
+// Re-check intent when app comes back to foreground (notification tap while app open)
+if (window.Capacitor?.Plugins?.App) {
+    window.Capacitor.Plugins.App.addListener('appStateChange', ({ isActive }) => {
+        if (isActive && isAuthenticated) checkNativeLaunchIntent();
+    });
+}
+
+// ─── Quick-Rate modal state ───────────────────────────────────────────────────
+let _quickRateActivity    = null;
+let _quickRateDurationMins = 0;
+let _allActivitiesCache   = [];
+
 // Error Handling
 function showError(message, errorType = 'general') {
     const errorModal = document.getElementById('errorModal');
@@ -109,15 +154,29 @@ function gapiLoaded() {
 
 async function initializeGapiClient() {
     try {
+        // Do NOT include apiKey here. The discovery-doc URL is public; adding the API key
+        // causes Google to enforce HTTP-referrer restrictions on the CORS preflight, which
+        // blocks requests from https://localhost (the Capacitor WebView origin). Omitting
+        // the key lets the fetch succeed from any origin. All actual Sheets API calls
+        // are authenticated via the OAuth Bearer token set by gapi.client.setToken(), so
+        // the API key is not needed for them either.
         await gapi.client.init({
-            apiKey: API_KEY,
             discoveryDocs: DISCOVERY_DOCS,
         });
         gapiInited = true;
         maybeEnableButtons();
     } catch (error) {
         console.error('Error initializing GAPI client:', error);
-        let errorMsg = error.message || error.result?.error?.message || 'Unknown error';
+        let errorMsg;
+        try {
+            // Capture everything – a network/CORS failure produces an empty object {}
+            // while an API-level error has result.error.message.
+            errorMsg = error.message
+                || error.result?.error?.message
+                || error.details
+                || (Object.keys(error).length ? JSON.stringify(error).substring(0, 300) : null)
+                || 'Unknown error (likely a CORS / network failure fetching the Google Sheets discovery document)';
+        } catch (e) { errorMsg = 'Unknown error'; }
         const errorCode = error.result?.error?.code || error.code;
         
         // Check for referer blocked error (403 from API Key restriction)
@@ -249,6 +308,7 @@ async function initializeApp() {
                     await loadActivities();
                     isAuthenticated = true;
                     enableAppButtons();
+                    checkNativeLaunchIntent();
                 } catch (error) {
                     console.error('Error after authentication:', error);
                     showError('Error setting up spreadsheet: ' + (error.message || 'Unknown error'));
@@ -287,6 +347,7 @@ async function initializeApp() {
             await loadActivities();
             isAuthenticated = true;
             enableAppButtons();
+            checkNativeLaunchIntent();
         }
     } catch (error) {
         console.error('Error initializing app:', error);
@@ -595,6 +656,10 @@ async function loadActivities() {
             };
         });
         
+        // Cache for quick-rate modal and native sync
+        _allActivitiesCache = activityMetrics.map(a => ({ id: a.id, name: a.name }));
+        syncActivitiesToNative(_allActivitiesCache);
+
         // Sort: running timers first, then alphabetically by name
         activityMetrics.sort((a, b) => {
             const aRunning = !!runningTimers[a.id];
@@ -927,7 +992,8 @@ async function startTimer() {
     };
     localStorage.setItem('runningTimers', JSON.stringify(runningTimers));
     await saveTimerToSheet(currentActivity.id, currentActivity.name, timerState.startTime);
-    
+    await notifyNativeTimerStart(currentActivity.id, currentActivity.name, timerState.startTime);
+
     document.getElementById('startTimerBtn').classList.add('hidden');
     document.getElementById('stopTimerBtn').classList.remove('hidden');
     
@@ -956,8 +1022,9 @@ async function stopTimer() {
         delete runningTimers[currentActivity.id];
         localStorage.setItem('runningTimers', JSON.stringify(runningTimers));
         await removeTimerFromSheet(currentActivity.id);
+        await notifyNativeTimerStop();
     }
-    
+
     // Reset timer display and state
     timerState.elapsed = 0;
     document.getElementById('timerDisplay').textContent = '00:00:00';
@@ -1195,7 +1262,7 @@ document.addEventListener('DOMContentLoaded', () => {
         if (typeof gapi === 'undefined') {
             showError('Google API library failed to load. Check your internet connection and make sure you\'re serving the app over HTTP/HTTPS (not opening file:// directly).');
         } else if (typeof google === 'undefined' || typeof google.accounts === 'undefined') {
-            showError('Google Identity Services failed to load. Check your internet connection.');
+            showError('GIS script loaded but google.accounts was not initialised (possible WebView block). UA: ' + navigator.userAgent.substring(0, 120));
         }
     }, 10000); // Wait 10 seconds for scripts to load
     
@@ -1230,7 +1297,8 @@ async function startTimerFromCard(activityId, activityName) {
     };
     localStorage.setItem('runningTimers', JSON.stringify(runningTimers));
     await saveTimerToSheet(activityId, activityName, startTime);
-    
+    await notifyNativeTimerStart(activityId, activityName, startTime);
+
     // Refresh activities list to show timer
     loadActivities();
 }
@@ -1251,7 +1319,8 @@ async function stopTimerFromCard(activityId, activityName) {
     delete runningTimers[activityId];
     localStorage.setItem('runningTimers', JSON.stringify(runningTimers));
     await removeTimerFromSheet(activityId);
-    
+    await notifyNativeTimerStop();
+
     // Refresh activities list
     loadActivities();
     
@@ -1397,6 +1466,58 @@ function updateSpreadsheetLink() {
     }
 }
 
+// ─── Quick-Rate modal (opened when app launched from "Stop & Rate" notification) ─
+function showQuickRateModal(activityId, activityName, startTimeMs) {
+    _quickRateActivity = { id: activityId, name: activityName };
+    const elapsedMs = Date.now() - startTimeMs;
+    _quickRateDurationMins = Math.max(1, Math.round(elapsedMs / 60000));
+    const totalSecs = Math.floor(elapsedMs / 1000);
+    const h = Math.floor(totalSecs / 3600);
+    const m = Math.floor((totalSecs % 3600) / 60);
+    const durationText = h > 0 ? `${h}h ${m}m` : `${m}m`;
+
+    document.getElementById('quickRateActivityName').textContent = activityName;
+    document.getElementById('quickRateDuration').textContent = `Duration: ${durationText}`;
+    const slider = document.getElementById('quickRateSlider');
+    slider.value = 5;
+    document.getElementById('quickRateValue').textContent = '5';
+
+    // Populate next-activity list (exclude the one being stopped)
+    const listEl = document.getElementById('quickRateActivityList');
+    listEl.innerHTML = _allActivitiesCache
+        .filter(a => a.id !== activityId)
+        .map(a => `<button class="btn btn-secondary" style="width:100%" onclick="quickRateStartNext('${a.id}','${a.name.replace(/'/g, "\\'")}')">${a.name}</button>`)
+        .join('');
+
+    document.getElementById('quickRateModal').classList.remove('hidden');
+    window.scrollTo(0, 0);
+}
+
+async function _quickRateSave() {
+    const rating = parseInt(document.getElementById('quickRateSlider').value);
+    document.getElementById('quickRateModal').classList.add('hidden');
+    const prev = currentActivity;
+    currentActivity = _quickRateActivity;
+    await saveSession(_quickRateDurationMins, rating);
+    currentActivity = prev;
+}
+
+async function quickRateSaveOnly() {
+    await _quickRateSave();
+    showPage('homePage');
+}
+
+async function quickRateStartNext(nextId, nextName) {
+    await _quickRateSave();
+    const startTime = Date.now();
+    runningTimers[nextId] = { startTime, activityName: nextName };
+    localStorage.setItem('runningTimers', JSON.stringify(runningTimers));
+    await saveTimerToSheet(nextId, nextName, startTime);
+    await notifyNativeTimerStart(nextId, nextName, startTime);
+    loadActivities();
+    showPage('homePage');
+}
+
 // Make functions available globally
 window.showPage = showPage;
 window.openActivity = openActivity;
@@ -1405,3 +1526,5 @@ window.startTimerFromCard = startTimerFromCard;
 window.stopTimerFromCard = stopTimerFromCard;
 window.gapiLoaded = gapiLoaded;
 window.gisLoaded = gisLoaded;
+window.quickRateSaveOnly = quickRateSaveOnly;
+window.quickRateStartNext = quickRateStartNext;

@@ -1,0 +1,8 @@
+{
+  "appId": "com.whentoquit.app",
+  "appName": "When To Quit",
+  "webDir": "www",
+  "server": {
+    "androidScheme": "https"
+  }
+}

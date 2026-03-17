@@ -3,6 +3,13 @@
   "appName": "When To Quit",
   "webDir": "www",
   "server": {
-    "androidScheme": "https"
+    "androidScheme": "https",
+    "allowNavigation": [
+      "accounts.google.com",
+      "www.google.com",
+      "google.com",
+      "ssl.gstatic.com",
+      "gstatic.com"
+    ]
   }
 }

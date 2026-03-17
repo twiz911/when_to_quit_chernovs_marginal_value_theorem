@@ -87,17 +87,26 @@
                 <div id="originInstructions" class="origin-instructions hidden">
                     <h3>🔒 JavaScript Origin Not Authorized</h3>
                     <p><strong>Error 400: redirect_uri_mismatch</strong></p>
-                    <p>Your OAuth Client ID is not configured for this domain. You need to add this origin to your OAuth Client ID's authorized origins list.</p>
+                    <p>Your OAuth Client ID is not configured for this domain. You need to add both JavaScript origins and redirect URIs.</p>
                     
                     <div class="browser-instructions">
                         <h4>How to Fix:</h4>
                         <ol>
                             <li>Go to: <a href="https://console.cloud.google.com/apis/credentials" target="_blank"><strong>Google Cloud Console - Credentials</strong></a></li>
                             <li>Find your <strong>OAuth 2.0 Client ID</strong> (NOT the API Key) and click the edit icon (pencil)</li>
-                            <li>Under <strong>"Authorized JavaScript origins"</strong>, click <strong>"+ ADD URI"</strong></li>
-                            <li>Add this exact origin (without /* at the end):
-                                <div class="code-box" id="currentOrigin"></div>
-                            </li>
+                            <li>Under <strong>"Authorized JavaScript origins"</strong>, make sure ALL three of these URIs are added:</li>
+                        </ol>
+                        <div class="code-box">http://localhost:8000</div>
+                        <div class="code-box">https://twiz911.github.io</div>
+                        <div class="code-box">https://localhost</div>
+                        <p style="margin-top:10px"><strong>Also under "Authorized redirect URIs", add:</strong></p>
+                        <div class="code-box">https://localhost</div>
+                        <div class="code-box">https://localhost/</div>
+                        <div class="code-box">http://localhost:8000</div>
+                        <div class="code-box">http://localhost:8000/</div>
+                        <div class="code-box">https://twiz911.github.io/when_to_quit_chernovs_marginal_value_theorem/index.html</div>
+                        <p style="margin-top:8px">Current origin of this page: <span class="code-box" id="currentOrigin" style="display:inline"></span></p>
+                        <ol start="4">
                             <li>Click <strong>"SAVE"</strong></li>
                             <li>Wait 1-2 minutes for changes to propagate, then refresh this page</li>
                         </ol>
@@ -107,6 +116,7 @@
                         <strong>Note:</strong> This is different from the API Key restriction. You need BOTH configured:
                         <ul>
                             <li><strong>OAuth Client ID</strong> → Authorized JavaScript origins (no /*)</li>
+                            <li><strong>OAuth Client ID</strong> → Authorized redirect URIs (Android app uses http://localhost:8000; also add localhost https and GitHub Pages variants)</li>
                             <li><strong>API Key</strong> → HTTP referrers (with /*)</li>
                         </ul>
                     </div>
@@ -184,8 +194,18 @@
                             <ul>
                                 <li>Edit your <strong>OAuth 2.0 Client ID</strong> (click the pencil icon)</li>
                                 <li>Choose application type: <strong>"Web application"</strong></li>
-                                <li>Under <strong>"Authorized JavaScript origins"</strong>, click "+ ADD URI"</li>
-                                <li>Add: <code id="setupOrigin"></code> (without /* at the end)</li>
+                                <li>Under <strong>"Authorized JavaScript origins"</strong>, add ALL three URIs (no /* at the end):<br>
+                                    <code>http://localhost:8000</code><br>
+                                    <code>https://twiz911.github.io</code><br>
+                                    <code>https://localhost</code>
+                                </li>
+                                <li>Under <strong>"Authorized redirect URIs"</strong>, add:<br>
+                                    <code>https://localhost</code><br>
+                                    <code>https://localhost/</code><br>
+                                    <code>http://localhost:8000</code><br>
+                                    <code>http://localhost:8000/</code><br>
+                                    <code>https://twiz911.github.io/when_to_quit_chernovs_marginal_value_theorem/index.html</code>
+                                </li>
                                 <li>Click <strong>SAVE</strong></li>
                             </ul>
                         </li>
@@ -332,6 +352,9 @@
     
     <script src="app.js?v=9"></script>
     <script src="https://apis.google.com/js/api.js" onload="gapiLoaded()" onerror="showError('Google API library (apis.google.com) failed to load. Check network connection.')"></script>
-    <script src="https://accounts.google.com/gsi/client" onload="gisLoaded()" onerror="showError('GIS script (accounts.google.com/gsi/client) failed to download. Check network connection.')"></script>
+    <script>
+        // Redirect-only OAuth flow: GIS popup library is not required.
+        gisLoaded();
+    </script>
 </body>
 </html>

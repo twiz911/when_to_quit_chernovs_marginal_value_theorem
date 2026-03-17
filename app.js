@@ -17,11 +17,47 @@ const WARNING_THRESHOLD_PERCENT = 20;
 
 const DISCOVERY_DOCS = ['https://sheets.googleapis.com/$discovery/rest?version=v4'];
 const SCOPES = 'https://www.googleapis.com/auth/spreadsheets';
+const OAUTH_STATE_KEY = 'oauthState';
+
+function isNativeAndroid() {
+    try {
+        const platform = window.Capacitor?.getPlatform?.();
+        if (platform === 'android') return true;
+
+        // Fallback detection for Capacitor WebView where getPlatform may not be ready yet.
+        const originLooksNative = window.location.origin === 'https://localhost';
+        const ua = navigator.userAgent || '';
+        const uaLooksAndroid = /Android/i.test(ua);
+        return originLooksNative && (uaLooksAndroid || !!window.Capacitor);
+    } catch (e) {
+        return false;
+    }
+}
+
+function parseOAuthTokenFromUrl(rawUrl) {
+    if (!rawUrl) return null;
+    try {
+        const parsed = new URL(rawUrl);
+        if (!parsed.hash || parsed.hash.length < 2) return null;
+        const params = new URLSearchParams(parsed.hash.slice(1));
+        const accessToken = params.get('access_token');
+        if (!accessToken) return null;
+
+        const expiresInSec = parseInt(params.get('expires_in') || '3600', 10);
+        return {
+            access_token: accessToken,
+            token_type: params.get('token_type') || 'Bearer',
+            expires_in: Number.isFinite(expiresInSec) ? expiresInSec : 3600,
+            expires_at: Date.now() + ((Number.isFinite(expiresInSec) ? expiresInSec : 3600) * 1000)
+        };
+    } catch (e) {
+        return null;
+    }
+}
 
 // Global State
 let gapiInited = false;
 let gisInited = false;
-let tokenClient;
 let spreadsheetId = SPREADSHEET_ID || localStorage.getItem('spreadsheetId') || null;
 let currentActivity = null;
 let timerInterval = null;
@@ -29,6 +65,7 @@ let timerStartTime = null;
 let elapsedSeconds = 0;
 let isAuthenticated = false; // Track if user is authenticated and ready
 let errorShown = false; // Track if error modal already shown
+let authInProgress = false;
 let runningTimers = JSON.parse(localStorage.getItem('runningTimers')) || {}; // { activityId: { startTime, elapsed, activityName } }
 
 // ─── Capacitor native bridge (graceful no-op in browser) ─────────────────────
@@ -68,6 +105,16 @@ async function checkNativeLaunchIntent() {
 if (window.Capacitor?.Plugins?.App) {
     window.Capacitor.Plugins.App.addListener('appStateChange', ({ isActive }) => {
         if (isActive && isAuthenticated) checkNativeLaunchIntent();
+    });
+
+    // Handle OAuth callback URLs when Android browser redirects back into the app.
+    window.Capacitor.Plugins.App.addListener('appUrlOpen', ({ url }) => {
+        const token = parseOAuthTokenFromUrl(url);
+        if (!token) return;
+
+        localStorage.setItem('gapiToken', JSON.stringify(token));
+        // Re-run app bootstrap with the new token.
+        window.location.reload();
     });
 }
 
@@ -192,49 +239,141 @@ async function initializeGapiClient() {
 }
 
 function gisLoaded() {
-    if (!checkConfiguration()) {
-        return;
-    }
-    
-    try {
-        tokenClient = google.accounts.oauth2.initTokenClient({
-            client_id: CLIENT_ID,
-            scope: SCOPES,
-            callback: '', // defined later
-            error_callback: (error) => {
-                console.error('OAuth initialization error:', error);
-                const errorMsg = error.message || error.type || JSON.stringify(error) || '';
-                const errorLower = errorMsg.toLowerCase();
-                
-                // Check for redirect_uri_mismatch or origin errors (400 errors)
-                if (errorLower.includes('redirect_uri') || errorLower.includes('redirect uri') || 
-                    errorLower.includes('400') || errorLower.includes('origin') || 
-                    errorLower.includes("doesn't comply")) {
-                    showError('OAuth Error: JavaScript origin not authorized for this domain. Your OAuth Client ID needs to be updated.', 'origin');
-                } else if (errorLower.includes('popup') || errorLower.includes('blocked')) {
-                    showError('Browser blocked the sign-in popup window. Please allow popups for this site.', 'popup');
-                } else {
-                    showError('OAuth error: ' + errorMsg);
-                }
-            }
-        });
-        gisInited = true;
-        maybeEnableButtons();
-    } catch (error) {
-        console.error('Error loading GIS:', error);
-        showError('Failed to initialize Google Sign-In. Error: ' + (error.message || 'Client ID may be invalid'));
-    }
+    // Redirect-only auth does not require GIS popup client.
+    gisInited = true;
+    maybeEnableButtons();
 }
 
 function maybeEnableButtons() {
-    if (gapiInited && gisInited) {
+    if (gapiInited) {
         initializeApp();
     }
+}
+
+function getRetryButton() {
+    return document.getElementById('retryConnectionBtn');
+}
+
+function setRetryButtonForSignIn() {
+    const retryBtn = getRetryButton();
+    if (!retryBtn) return;
+    retryBtn.textContent = 'Connect Google';
+}
+
+function setRetryButtonForRetry() {
+    const retryBtn = getRetryButton();
+    if (!retryBtn) return;
+    retryBtn.textContent = 'Retry Connection';
+}
+
+function clearUrlHash() {
+    if (!window.location.hash) return;
+    const cleanUrl = window.location.pathname + window.location.search;
+    window.history.replaceState({}, document.title, cleanUrl);
+}
+
+function getRedirectUri() {
+    if (isNativeAndroid()) {
+        return 'https://localhost';
+    }
+
+    // Use the exact current page URL (without query/hash) so Google receives
+    // the same redirect URI users can register in Cloud Console.
+    const url = new URL(window.location.href);
+    url.search = '';
+    url.hash = '';
+
+    // Google redirect URI checks are strict; localhost root often gets registered
+    // without a trailing slash in Cloud Console.
+    const isLocalhostRoot =
+        url.hostname === 'localhost' &&
+        (url.pathname === '/' || url.pathname === '');
+    if (isLocalhostRoot) {
+        return `${url.protocol}//${url.host}`;
+    }
+
+    return url.toString();
+}
+
+function getOAuthTokenFromHash() {
+    if (!window.location.hash || window.location.hash.length < 2) return null;
+    const params = new URLSearchParams(window.location.hash.slice(1));
+
+    if (params.get('error')) {
+        const error = params.get('error') || '';
+        const errorDescription = params.get('error_description') || error;
+        clearUrlHash();
+
+        if (error.includes('access_denied')) {
+            showError('Sign-in was canceled. Tap "Connect Google" to try again.', 'popup');
+        } else if (error.includes('redirect_uri')) {
+            showError('OAuth redirect URI is not authorized. Add this exact URI to Authorized redirect URIs: ' + getRedirectUri(), 'origin');
+        } else {
+            showError('Google sign-in failed: ' + errorDescription);
+        }
+        return null;
+    }
+
+    const accessToken = params.get('access_token');
+    if (!accessToken) return null;
+
+    const returnedState = params.get('state') || '';
+    const expectedState = localStorage.getItem(OAUTH_STATE_KEY) || '';
+    localStorage.removeItem(OAUTH_STATE_KEY);
+
+    if (expectedState && returnedState !== expectedState) {
+        clearUrlHash();
+        showError('OAuth state validation failed. Tap "Connect Google" and try again.');
+        return null;
+    }
+
+    const expiresInSec = parseInt(params.get('expires_in') || '3600', 10);
+    const token = {
+        access_token: accessToken,
+        token_type: params.get('token_type') || 'Bearer',
+        expires_in: Number.isFinite(expiresInSec) ? expiresInSec : 3600,
+        expires_at: Date.now() + ((Number.isFinite(expiresInSec) ? expiresInSec : 3600) * 1000)
+    };
+
+    clearUrlHash();
+    return token;
+}
+
+function startAndroidRedirectAuth() {
+    const state = `${Date.now()}_${Math.random().toString(36).slice(2)}`;
+    localStorage.setItem(OAUTH_STATE_KEY, state);
+
+    const redirectUri = getRedirectUri();
+    const authUrl = new URL('https://accounts.google.com/o/oauth2/v2/auth');
+    authUrl.searchParams.set('client_id', CLIENT_ID);
+    authUrl.searchParams.set('redirect_uri', redirectUri);
+    authUrl.searchParams.set('response_type', 'token');
+    authUrl.searchParams.set('scope', SCOPES);
+    authUrl.searchParams.set('include_granted_scopes', 'true');
+    authUrl.searchParams.set('prompt', 'consent select_account');
+    authUrl.searchParams.set('state', state);
+
+    window.location.assign(authUrl.toString());
+}
+
+function requestGoogleAuthFromUserGesture() {
+    if (!gapiInited) {
+        showError('Google services are still initializing. Please try again in a moment.');
+        return;
+    }
+    startAndroidRedirectAuth();
 }
 
 // Initialize App
 async function initializeApp() {
     try {
+        const tokenFromHash = getOAuthTokenFromHash();
+
+        if (tokenFromHash) {
+            gapi.client.setToken(tokenFromHash);
+            localStorage.setItem('gapiToken', JSON.stringify(tokenFromHash));
+        }
+
         // Try to restore token from localStorage
         const savedToken = localStorage.getItem('gapiToken');
         let tokenValid = false;
@@ -268,78 +407,13 @@ async function initializeApp() {
         
         // Check if we have a valid access token
         if (!tokenValid || gapi.client.getToken() === null) {
-            // Prompt the user to select a Google account and ask for consent
-            tokenClient.callback = async (resp) => {
-                if (resp.error !== undefined) {
-                    console.error('OAuth error:', resp);
-                    const errorDesc = resp.error_description || resp.error || '';
-                    const errorLower = errorDesc.toLowerCase();
-                    
-                    // Check for specific error types - OAuth errors take priority
-                    if (errorLower.includes('redirect_uri') || errorLower.includes('redirect uri') || 
-                        errorLower.includes('origin') || errorLower.includes('invalid') || 
-                        errorLower.includes('400') || errorLower.includes("doesn't comply")) {
-                        showError('OAuth Error: JavaScript origin not authorized for this domain. The OAuth Client ID needs to include this domain in "Authorized JavaScript origins".', 'origin');
-                    } else if (errorLower.includes('403') || errorLower.includes('access_denied') || errorLower.includes('access blocked') || errorLower.includes('verification process') || errorLower.includes('not completed') || errorLower.includes('test user')) {
-                        showError('Access blocked: Your email needs to be added as a test user. Click below for instructions.', 'testuser');
-                    } else if (errorLower.includes('popup')) {
-                        showError('Popup was blocked or closed.', 'popup');
-                    } else {
-                        showError('Authentication failed: ' + errorDesc + '. Make sure you\'ve added your email as a test user in the OAuth consent screen.');
-                    }
-                    return;
-                }
-                try {
-                    hideError(); // Dismiss any stale error shown while waiting for auth
-                    // Save token to localStorage with expiration timestamp
-                    const token = gapi.client.getToken();
-                    if (token) {
-                        // Add expiration timestamp (expires_in is in seconds from now)
-                        if (token.expires_in) {
-                            token.expires_at = Date.now() + (token.expires_in * 1000);
-                        }
-                        localStorage.setItem('gapiToken', JSON.stringify(token));
-                        console.log('Saved token to localStorage with expiration');
-                    }
-                    
-                    await setupSpreadsheet();
-                    updateSpreadsheetLink();
-                    await loadTimersFromSheet();
-                    await loadActivities();
-                    isAuthenticated = true;
-                    enableAppButtons();
-                    checkNativeLaunchIntent();
-                } catch (error) {
-                    console.error('Error after authentication:', error);
-                    showError('Error setting up spreadsheet: ' + (error.message || 'Unknown error'));
-                }
-            };
-            
-            try {
-                // Request access token with popup (empty prompt = only show if needed)
-                tokenClient.requestAccessToken({ prompt: '' });
-                
-                // Check after a delay if auth didn't complete and no error was shown.
-                // Use 30s to allow time for mobile auth flows (redirect-based or slow popup).
-                setTimeout(() => {
-                    if (!isAuthenticated && !errorShown) {
-                        console.log('Authentication timed out');
-                        showError('Sign-in did not complete. If a sign-in popup appeared, make sure to select your account. Then click "Retry Connection" below.', 'popup');
-                    }
-                }, 30000);
-            } catch (error) {
-                console.error('Error requesting access token:', error);
-                const errorMsg = error.message || error.toString();
-                const errorLower = errorMsg.toLowerCase();
-                
-                if (errorLower.includes('popup') || errorLower.includes('blocked')) {
-                    showError('Browser blocked the sign-in popup. Please allow popups for this site and try again.', 'popup');
-                } else if (errorLower.includes('redirect_uri') || errorLower.includes('origin')) {
-                    showError('OAuth configuration error. The JavaScript origin is not authorized.', 'origin');
-                } else {
-                    showError('Failed to request access token. Check that your OAuth Client ID is correct and the authorized origin includes this domain.');
-                }
+            setRetryButtonForSignIn();
+            if (isNativeAndroid()) {
+                // In Android WebView redirect flow, automatic navigation is safe (no popup).
+                requestGoogleAuthFromUserGesture();
+                return;
             }
+            showError('Tap "Connect Google" below to sign in. This uses full-page redirect (no popup).');
         } else {
             await setupSpreadsheet();
             updateSpreadsheetLink();
@@ -348,6 +422,7 @@ async function initializeApp() {
             isAuthenticated = true;
             enableAppButtons();
             checkNativeLaunchIntent();
+            setRetryButtonForRetry();
         }
     } catch (error) {
         console.error('Error initializing app:', error);
@@ -1128,27 +1203,14 @@ document.addEventListener('DOMContentLoaded', () => {
         testUserEmailEl.textContent = 'the email you\'re trying to sign in with';
     }
     
-    // Monitor for popup blocking (catch GSI_LOGGER messages)
-    // Note: OAuth origin errors often trigger this warning even though popup opened
-    // Give very low priority - only show if no other error shown
-    const originalConsoleWarn = console.warn;
-    console.warn = function(...args) {
-        const message = args.join(' ');
-        if (message.includes('GSI_LOGGER') && message.includes('Failed to open popup')) {
-            // Wait to see if an OAuth error or timeout comes through first
-            setTimeout(() => {
-                if (!errorShown && !isAuthenticated) {
-                    // Default to origin error since popup "failed" often means OAuth rejected the origin
-                    console.log('GSI popup failed - likely origin not authorized');
-                    showError('Sign-in popup failed. If you saw an error message about "redirect_uri_mismatch" or "invalid request", the JavaScript origin needs to be added.', 'origin');
-                }
-            }, 2000);
-        }
-        originalConsoleWarn.apply(console, args);
-    };
+    // Redirect-only OAuth path: no popup monitoring required.
     
     // Error Modal Buttons
     document.getElementById('retryConnectionBtn').addEventListener('click', () => {
+        if (!isAuthenticated && gapiInited) {
+            requestGoogleAuthFromUserGesture();
+            return;
+        }
         hideError();
         location.reload();
     });
@@ -1257,12 +1319,10 @@ document.addEventListener('DOMContentLoaded', () => {
         }
     });
     
-    // Check if Google APIs loaded after a timeout
+    // Check if Google API loaded after a timeout
     setTimeout(() => {
         if (typeof gapi === 'undefined') {
             showError('Google API library failed to load. Check your internet connection and make sure you\'re serving the app over HTTP/HTTPS (not opening file:// directly).');
-        } else if (typeof google === 'undefined' || typeof google.accounts === 'undefined') {
-            showError('GIS script loaded but google.accounts was not initialised (possible WebView block). UA: ' + navigator.userAgent.substring(0, 120));
         }
     }, 10000); // Wait 10 seconds for scripts to load
     

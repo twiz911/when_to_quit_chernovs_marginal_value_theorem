@@ -34,6 +34,10 @@ public class TimerPlugin extends Plugin {
     public void stopService(PluginCall call) {
         Intent intent = new Intent(getContext(), TimerService.class);
         intent.setAction(TimerService.ACTION_STOP);
+        String activityId = call.getString("activityId", null);
+        if (activityId != null && !activityId.isEmpty()) {
+            intent.putExtra("activityId", activityId);
+        }
         getContext().startService(intent);
         call.resolve();
     }
@@ -71,6 +75,11 @@ public class TimerPlugin extends Plugin {
             result.put("activityName", intent.getStringExtra("activityName"));
             result.put("startTime",    intent.getLongExtra("startTime", 0));
             // Consume so it is not replayed on the next call
+            intent.removeExtra("capacitor_action");
+        } else if ("OPEN_ACTIVITY".equals(action)) {
+            result.put("action", "OPEN_ACTIVITY");
+            result.put("activityId", intent.getStringExtra("activityId"));
+            result.put("activityName", intent.getStringExtra("activityName"));
             intent.removeExtra("capacitor_action");
         } else {
             result.put("action", "none");

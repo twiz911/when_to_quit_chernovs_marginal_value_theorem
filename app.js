@@ -66,6 +66,7 @@ let elapsedSeconds = 0;
 let isAuthenticated = false; // Track if user is authenticated and ready
 let errorShown = false; // Track if error modal already shown
 let authInProgress = false;
+let oauthErrorSeen = false;
 let runningTimers = JSON.parse(localStorage.getItem('runningTimers')) || {}; // { activityId: { startTime, elapsed, activityName } }
 
 // ─── Capacitor native bridge (graceful no-op in browser) ─────────────────────
@@ -79,10 +80,28 @@ async function notifyNativeTimerStart(activityId, activityName, startTime) {
     catch (e) { console.warn('TimerPlugin.startService:', e); }
 }
 
-async function notifyNativeTimerStop() {
+async function notifyNativeTimerStop(activityId = null) {
     if (!TimerPlugin) return;
-    try { await TimerPlugin.stopService(); }
+    try {
+        if (activityId) {
+            await TimerPlugin.stopService({ activityId });
+        } else {
+            await TimerPlugin.stopService();
+        }
+    }
     catch (e) { console.warn('TimerPlugin.stopService:', e); }
+}
+
+async function syncRunningTimersToNativeNotifications() {
+    if (!TimerPlugin) return;
+
+    const entries = Object.entries(runningTimers || {});
+    for (const [activityId, timer] of entries) {
+        const startTime = Number(timer?.startTime);
+        const activityName = timer?.activityName || 'Activity';
+        if (!activityId || !Number.isFinite(startTime) || startTime <= 0) continue;
+        await notifyNativeTimerStart(activityId, activityName, startTime);
+    }
 }
 
 async function syncActivitiesToNative(activities) {
@@ -96,7 +115,13 @@ async function checkNativeLaunchIntent() {
     try {
         const result = await TimerPlugin.getIntentAction();
         if (result.action === 'STOP_AND_RATE') {
-            showQuickRateModal(result.activityId, result.activityName, parseInt(result.startTime));
+            if (result.activityId && result.activityName) {
+                openActivity(result.activityId, result.activityName);
+            }
+        } else if (result.action === 'OPEN_ACTIVITY') {
+            if (result.activityId && result.activityName) {
+                openActivity(result.activityId, result.activityName);
+            }
         }
     } catch (e) { console.warn('TimerPlugin.getIntentAction:', e); }
 }
@@ -104,7 +129,10 @@ async function checkNativeLaunchIntent() {
 // Re-check intent when app comes back to foreground (notification tap while app open)
 if (window.Capacitor?.Plugins?.App) {
     window.Capacitor.Plugins.App.addListener('appStateChange', ({ isActive }) => {
-        if (isActive && isAuthenticated) checkNativeLaunchIntent();
+        if (isActive && isAuthenticated) {
+            checkNativeLaunchIntent();
+            syncRunningTimersToNativeNotifications();
+        }
     });
 
     // Handle OAuth callback URLs when Android browser redirects back into the app.
@@ -300,6 +328,7 @@ function getOAuthTokenFromHash() {
     const params = new URLSearchParams(window.location.hash.slice(1));
 
     if (params.get('error')) {
+        oauthErrorSeen = true;
         const error = params.get('error') || '';
         const errorDescription = params.get('error_description') || error;
         clearUrlHash();
@@ -334,6 +363,8 @@ function getOAuthTokenFromHash() {
         expires_in: Number.isFinite(expiresInSec) ? expiresInSec : 3600,
         expires_at: Date.now() + ((Number.isFinite(expiresInSec) ? expiresInSec : 3600) * 1000)
     };
+
+        oauthErrorSeen = false;
 
     clearUrlHash();
     return token;
@@ -374,6 +405,10 @@ async function initializeApp() {
             localStorage.setItem('gapiToken', JSON.stringify(tokenFromHash));
         }
 
+        // Re-create persistent native notifications for any locally running timers
+        // as soon as the app starts.
+        await syncRunningTimersToNativeNotifications();
+
         // Try to restore token from localStorage
         const savedToken = localStorage.getItem('gapiToken');
         let tokenValid = false;
@@ -408,8 +443,8 @@ async function initializeApp() {
         // Check if we have a valid access token
         if (!tokenValid || gapi.client.getToken() === null) {
             setRetryButtonForSignIn();
-            if (isNativeAndroid()) {
-                // In Android WebView redirect flow, automatic navigation is safe (no popup).
+            if (!oauthErrorSeen) {
+                // Redirect-based auth can be auto-started when not signed in.
                 requestGoogleAuthFromUserGesture();
                 return;
             }
@@ -418,6 +453,7 @@ async function initializeApp() {
             await setupSpreadsheet();
             updateSpreadsheetLink();
             await loadTimersFromSheet();
+            await syncRunningTimersToNativeNotifications();
             await loadActivities();
             isAuthenticated = true;
             enableAppButtons();
@@ -1097,7 +1133,7 @@ async function stopTimer() {
         delete runningTimers[currentActivity.id];
         localStorage.setItem('runningTimers', JSON.stringify(runningTimers));
         await removeTimerFromSheet(currentActivity.id);
-        await notifyNativeTimerStop();
+        await notifyNativeTimerStop(currentActivity.id);
     }
 
     // Reset timer display and state
@@ -1379,7 +1415,7 @@ async function stopTimerFromCard(activityId, activityName) {
     delete runningTimers[activityId];
     localStorage.setItem('runningTimers', JSON.stringify(runningTimers));
     await removeTimerFromSheet(activityId);
-    await notifyNativeTimerStop();
+    await notifyNativeTimerStop(activityId);
 
     // Refresh activities list
     loadActivities();

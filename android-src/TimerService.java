@@ -10,24 +10,34 @@ import android.os.Handler;
 import android.os.IBinder;
 import android.os.Looper;
 import androidx.core.app.NotificationCompat;
+import java.util.HashMap;
+import java.util.HashSet;
 import java.util.Locale;
+import java.util.Map;
+import java.util.Set;
 
 public class TimerService extends Service {
 
     public static final String ACTION_START = "ACTION_START";
     public static final String ACTION_STOP  = "ACTION_STOP";
+    public static final String ACTION_DISMISS_NOTIFICATION = "ACTION_DISMISS_NOTIFICATION";
 
-    private static final String CHANNEL_ID     = "timer_channel";
-    private static final int    NOTIFICATION_ID = 1;
+    private static final String CHANNEL_ID = "timer_channel";
+    private static final int SUMMARY_NOTIFICATION_ID = 1;
 
-    private final Handler   handler      = new Handler(Looper.getMainLooper());
-    private       String    activityId;
-    private       String    activityName;
-    private       long      startTime;
+    private static class TimerEntry {
+        String activityId;
+        String activityName;
+        long startTime;
+    }
+
+    private final Handler handler = new Handler(Looper.getMainLooper());
+    private final Map<String, TimerEntry> runningTimers = new HashMap<>();
+    private final Set<String> dismissedNotifications = new HashSet<>();
 
     private final Runnable tickRunnable = new Runnable() {
         @Override public void run() {
-            updateNotification();
+            updateNotifications();
             handler.postDelayed(this, 1000);
         }
     };
@@ -35,57 +45,116 @@ public class TimerService extends Service {
     @Override
     public int onStartCommand(Intent intent, int flags, int startId) {
         if (intent == null) return START_NOT_STICKY;
+        createNotificationChannel();
 
-        if (ACTION_START.equals(intent.getAction())) {
-            activityId   = intent.getStringExtra("activityId");
-            activityName = intent.getStringExtra("activityName");
-            startTime    = intent.getLongExtra("startTime", System.currentTimeMillis());
+        String action = intent.getAction();
+        if (ACTION_START.equals(action)) {
+            String activityId = intent.getStringExtra("activityId");
+            if (activityId != null && !activityId.isEmpty()) {
+                TimerEntry entry = new TimerEntry();
+                entry.activityId = activityId;
+                entry.activityName = intent.getStringExtra("activityName");
+                entry.startTime = intent.getLongExtra("startTime", System.currentTimeMillis());
+                runningTimers.put(activityId, entry);
+                dismissedNotifications.remove(activityId);
+            }
+        } else if (ACTION_STOP.equals(action)) {
+            String activityId = intent.getStringExtra("activityId");
+            if (activityId != null && !activityId.isEmpty()) {
+                runningTimers.remove(activityId);
+                dismissedNotifications.remove(activityId);
+                NotificationManager nm = (NotificationManager) getSystemService(NOTIFICATION_SERVICE);
+                if (nm != null) nm.cancel(notificationIdFor(activityId));
+            } else {
+                runningTimers.clear();
+                dismissedNotifications.clear();
+            }
+        } else if (ACTION_DISMISS_NOTIFICATION.equals(action)) {
+            String activityId = intent.getStringExtra("activityId");
+            if (activityId != null && !activityId.isEmpty()) {
+                dismissedNotifications.add(activityId);
+                NotificationManager nm = (NotificationManager) getSystemService(NOTIFICATION_SERVICE);
+                if (nm != null) nm.cancel(notificationIdFor(activityId));
+            }
+        }
 
-            createNotificationChannel();
-            startForeground(NOTIFICATION_ID, buildNotification("00:00:00"));
-            handler.removeCallbacks(tickRunnable);
-            handler.post(tickRunnable);
-
-        } else if (ACTION_STOP.equals(intent.getAction())) {
+        if (runningTimers.isEmpty()) {
             handler.removeCallbacks(tickRunnable);
             stopForeground(true);
             stopSelf();
+            return START_NOT_STICKY;
         }
+
+        startForeground(SUMMARY_NOTIFICATION_ID, buildSummaryNotification());
+        updateNotifications();
+        handler.removeCallbacks(tickRunnable);
+        handler.post(tickRunnable);
+
         return START_STICKY;
     }
 
-    private void updateNotification() {
-        long elapsed = (System.currentTimeMillis() - startTime) / 1000;
-        String time = String.format(Locale.US, "%02d:%02d:%02d",
-                elapsed / 3600, (elapsed % 3600) / 60, elapsed % 60);
+    private void updateNotifications() {
         NotificationManager nm = (NotificationManager) getSystemService(NOTIFICATION_SERVICE);
-        if (nm != null) nm.notify(NOTIFICATION_ID, buildNotification(time));
+        if (nm == null) return;
+
+        nm.notify(SUMMARY_NOTIFICATION_ID, buildSummaryNotification());
+
+        for (TimerEntry entry : runningTimers.values()) {
+            if (dismissedNotifications.contains(entry.activityId)) continue;
+            long elapsed = (System.currentTimeMillis() - entry.startTime) / 1000;
+            String time = String.format(Locale.US, "%02d:%02d:%02d",
+                    elapsed / 3600, (elapsed % 3600) / 60, elapsed % 60);
+            nm.notify(notificationIdFor(entry.activityId), buildActivityNotification(entry, time));
+        }
     }
 
-    private Notification buildNotification(String elapsed) {
-        // "Stop & Rate" action — sends broadcast to StopRateReceiver
-        Intent stopIntent = new Intent(this, StopRateReceiver.class);
-        stopIntent.putExtra("activityId",   activityId);
-        stopIntent.putExtra("activityName", activityName);
-        stopIntent.putExtra("startTime",    startTime);
-        PendingIntent stopPi = PendingIntent.getBroadcast(this, 0, stopIntent,
-                PendingIntent.FLAG_UPDATE_CURRENT | PendingIntent.FLAG_IMMUTABLE);
-
-        // Tapping the notification body opens the app normally
+    private Notification buildSummaryNotification() {
         Intent openIntent = new Intent(this, MainActivity.class);
         openIntent.setFlags(Intent.FLAG_ACTIVITY_SINGLE_TOP);
         PendingIntent openPi = PendingIntent.getActivity(this, 1, openIntent,
                 PendingIntent.FLAG_UPDATE_CURRENT | PendingIntent.FLAG_IMMUTABLE);
 
+        int count = runningTimers.size();
+        String text = count <= 0
+            ? "Activity Timers"
+            : (count == 1 ? "1 activity running" : (count + " activities running"));
+
         return new NotificationCompat.Builder(this, CHANNEL_ID)
-                .setContentTitle(activityName)
+            .setContentTitle("When To Quit")
+                .setContentText(text)
+                .setSmallIcon(android.R.drawable.ic_media_play)
+                .setContentIntent(openPi)
+                .setOngoing(true)
+                .setOnlyAlertOnce(true)
+                .setSilent(true)
+                .build();
+    }
+
+    private Notification buildActivityNotification(TimerEntry entry, String elapsed) {
+        Intent openIntent = new Intent(this, OpenActivityReceiver.class);
+        openIntent.putExtra("activityId", entry.activityId);
+        openIntent.putExtra("activityName", entry.activityName);
+        openIntent.putExtra("startTime", entry.startTime);
+        PendingIntent openPi = PendingIntent.getBroadcast(
+                this,
+                notificationIdFor(entry.activityId),
+                openIntent,
+                PendingIntent.FLAG_UPDATE_CURRENT | PendingIntent.FLAG_IMMUTABLE
+        );
+
+        return new NotificationCompat.Builder(this, CHANNEL_ID)
+                .setContentTitle(entry.activityName)
                 .setContentText("\u23f1 " + elapsed)   // ⏱
                 .setSmallIcon(android.R.drawable.ic_media_play)
                 .setContentIntent(openPi)
-                .addAction(android.R.drawable.ic_media_pause, "Stop & Rate", stopPi)
                 .setOngoing(true)
+                .setOnlyAlertOnce(true)
                 .setSilent(true)
                 .build();
+    }
+
+    private int notificationIdFor(String activityId) {
+        return 1000 + Math.abs(activityId.hashCode() % 100000);
     }
 
     private void createNotificationChannel() {

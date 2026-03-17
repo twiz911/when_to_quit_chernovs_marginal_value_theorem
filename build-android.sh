@@ -271,6 +271,14 @@ patch_manifest() {
     info "  StopRateReceiver already present"
   fi
 
+  if ! grep -q "OpenActivityReceiver" "$manifest"; then
+    local OPEN_ACTIVITY_RECEIVER_BLOCK='        <receiver\n            android:name=".OpenActivityReceiver"\n            android:exported="false" />'
+    sed -i.bak "s|</application>|${OPEN_ACTIVITY_RECEIVER_BLOCK}\n    </application>|" "$manifest"
+    info "  Added OpenActivityReceiver"
+  else
+    info "  OpenActivityReceiver already present"
+  fi
+
   # clean up sed backups
   rm -f "${manifest}.bak"
   success "AndroidManifest.xml patched"

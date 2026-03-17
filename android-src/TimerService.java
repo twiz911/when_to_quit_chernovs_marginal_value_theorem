@@ -46,6 +46,7 @@ public class TimerService extends Service {
     public int onStartCommand(Intent intent, int flags, int startId) {
         if (intent == null) return START_NOT_STICKY;
         createNotificationChannel();
+        cancelLegacySummaryNotification();
 
         String action = intent.getAction();
         if (ACTION_START.equals(action)) {
@@ -81,11 +82,12 @@ public class TimerService extends Service {
         if (runningTimers.isEmpty()) {
             handler.removeCallbacks(tickRunnable);
             stopForeground(true);
+            cancelLegacySummaryNotification();
             stopSelf();
             return START_NOT_STICKY;
         }
 
-        startForeground(SUMMARY_NOTIFICATION_ID, buildSummaryNotification());
+        startForegroundWithTimerNotification();
         updateNotifications();
         handler.removeCallbacks(tickRunnable);
         handler.post(tickRunnable);
@@ -97,37 +99,50 @@ public class TimerService extends Service {
         NotificationManager nm = (NotificationManager) getSystemService(NOTIFICATION_SERVICE);
         if (nm == null) return;
 
-        nm.notify(SUMMARY_NOTIFICATION_ID, buildSummaryNotification());
+        // Clean up any legacy summary notification row.
+        cancelLegacySummaryNotification();
 
         for (TimerEntry entry : runningTimers.values()) {
             if (dismissedNotifications.contains(entry.activityId)) continue;
             long elapsed = (System.currentTimeMillis() - entry.startTime) / 1000;
-            String time = String.format(Locale.US, "%02d:%02d:%02d",
-                    elapsed / 3600, (elapsed % 3600) / 60, elapsed % 60);
+            String time = formatElapsed(elapsed);
             nm.notify(notificationIdFor(entry.activityId), buildActivityNotification(entry, time));
         }
+
+        startForegroundWithTimerNotification();
     }
 
-    private Notification buildSummaryNotification() {
-        Intent openIntent = new Intent(this, MainActivity.class);
-        openIntent.setFlags(Intent.FLAG_ACTIVITY_SINGLE_TOP);
-        PendingIntent openPi = PendingIntent.getActivity(this, 1, openIntent,
-                PendingIntent.FLAG_UPDATE_CURRENT | PendingIntent.FLAG_IMMUTABLE);
+    private void startForegroundWithTimerNotification() {
+        TimerEntry foregroundEntry = pickForegroundEntry();
+        if (foregroundEntry == null) return;
 
-        int count = runningTimers.size();
-        String text = count <= 0
-            ? "Activity Timers"
-            : (count == 1 ? "1 activity running" : (count + " activities running"));
+        long elapsed = (System.currentTimeMillis() - foregroundEntry.startTime) / 1000;
+        String time = formatElapsed(elapsed);
+        startForeground(
+                notificationIdFor(foregroundEntry.activityId),
+                buildActivityNotification(foregroundEntry, time)
+        );
+    }
 
-        return new NotificationCompat.Builder(this, CHANNEL_ID)
-            .setContentTitle("When To Quit")
-                .setContentText(text)
-                .setSmallIcon(android.R.drawable.ic_media_play)
-                .setContentIntent(openPi)
-                .setOngoing(true)
-                .setOnlyAlertOnce(true)
-                .setSilent(true)
-                .build();
+    private String formatElapsed(long elapsedSeconds) {
+        long safe = Math.max(0, elapsedSeconds);
+        long days = safe / 86400;
+        long rem = safe % 86400;
+        long hours = rem / 3600;
+        long minutes = (rem % 3600) / 60;
+        long seconds = rem % 60;
+        String hms = String.format(Locale.US, "%02d:%02d:%02d", hours, minutes, seconds);
+        return days > 0 ? (days + "d " + hms) : hms;
+    }
+
+    private TimerEntry pickForegroundEntry() {
+        for (TimerEntry entry : runningTimers.values()) {
+            if (!dismissedNotifications.contains(entry.activityId)) return entry;
+        }
+        for (TimerEntry entry : runningTimers.values()) {
+            return entry;
+        }
+        return null;
     }
 
     private Notification buildActivityNotification(TimerEntry entry, String elapsed) {
@@ -157,6 +172,11 @@ public class TimerService extends Service {
         return 1000 + Math.abs(activityId.hashCode() % 100000);
     }
 
+    private void cancelLegacySummaryNotification() {
+        NotificationManager nm = (NotificationManager) getSystemService(NOTIFICATION_SERVICE);
+        if (nm != null) nm.cancel(SUMMARY_NOTIFICATION_ID);
+    }
+
     private void createNotificationChannel() {
         NotificationChannel channel = new NotificationChannel(
                 CHANNEL_ID, "Activity Timer", NotificationManager.IMPORTANCE_LOW);
@@ -170,6 +190,7 @@ public class TimerService extends Service {
     @Override
     public void onDestroy() {
         handler.removeCallbacks(tickRunnable);
+        cancelLegacySummaryNotification();
         super.onDestroy();
     }
 }

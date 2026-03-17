@@ -67,7 +67,10 @@ let isAuthenticated = false; // Track if user is authenticated and ready
 let errorShown = false; // Track if error modal already shown
 let authInProgress = false;
 let oauthErrorSeen = false;
+let pendingRatingActivityId = null;
 let runningTimers = JSON.parse(localStorage.getItem('runningTimers')) || {}; // { activityId: { startTime, elapsed, activityName } }
+let pausedTimers = {}; // in-memory only; cleared on reload if no save
+let homeTimersSyncInFlight = false;
 
 // ─── Capacitor native bridge (graceful no-op in browser) ─────────────────────
 const TimerPlugin = (() => {
@@ -92,8 +95,25 @@ async function notifyNativeTimerStop(activityId = null) {
     catch (e) { console.warn('TimerPlugin.stopService:', e); }
 }
 
-async function syncRunningTimersToNativeNotifications() {
+function formatElapsedHms(totalSeconds) {
+    const seconds = Math.max(0, Math.floor(totalSeconds || 0));
+    const days = Math.floor(seconds / 86400);
+    const dayRemainder = seconds % 86400;
+    const hours = Math.floor(dayRemainder / 3600);
+    const minutes = Math.floor((dayRemainder % 3600) / 60);
+    const secs = dayRemainder % 60;
+    const hms = `${String(hours).padStart(2, '0')}:${String(minutes).padStart(2, '0')}:${String(secs).padStart(2, '0')}`;
+    return days > 0 ? `${days}d ${hms}` : hms;
+}
+
+async function syncRunningTimersToNativeNotifications(forceReconcile = false) {
     if (!TimerPlugin) return;
+
+    if (forceReconcile) {
+        // Clear all native timer notifications/service state first, then rebuild
+        // from the current runningTimers snapshot to avoid stale notifications.
+        await notifyNativeTimerStop();
+    }
 
     const entries = Object.entries(runningTimers || {});
     for (const [activityId, timer] of entries) {
@@ -128,10 +148,15 @@ async function checkNativeLaunchIntent() {
 
 // Re-check intent when app comes back to foreground (notification tap while app open)
 if (window.Capacitor?.Plugins?.App) {
-    window.Capacitor.Plugins.App.addListener('appStateChange', ({ isActive }) => {
+    window.Capacitor.Plugins.App.addListener('appStateChange', async ({ isActive }) => {
         if (isActive && isAuthenticated) {
             checkNativeLaunchIntent();
-            syncRunningTimersToNativeNotifications();
+            await loadTimersFromSheet();
+            await syncRunningTimersToNativeNotifications(true);
+            const homePage = document.getElementById('homePage');
+            if (homePage && homePage.classList.contains('active')) {
+                loadActivities();
+            }
         }
     });
 
@@ -649,6 +674,21 @@ async function loadTimersFromSheet() {
     }
 }
 
+async function refreshHomeTimersFromSheet() {
+    if (!isAuthenticated || !spreadsheetId || homeTimersSyncInFlight) return;
+    const homePage = document.getElementById('homePage');
+    if (!homePage || !homePage.classList.contains('active')) return;
+
+    homeTimersSyncInFlight = true;
+    try {
+        await loadTimersFromSheet();
+        await syncRunningTimersToNativeNotifications(true);
+        await loadActivities();
+    } finally {
+        homeTimersSyncInFlight = false;
+    }
+}
+
 // Find the maximum most-recent time percentage where recent avg < initial avg.
 // Scans session boundaries and returns the split with the largest "recent" portion
 // that still has a lower average than the initial portion.
@@ -775,13 +815,17 @@ async function loadActivities() {
         activityMetrics.sort((a, b) => {
             const aRunning = !!runningTimers[a.id];
             const bRunning = !!runningTimers[b.id];
+            const aPaused = !!pausedTimers[a.id];
+            const bPaused = !!pausedTimers[b.id];
             if (aRunning !== bRunning) return aRunning ? -1 : 1;
+            if (aPaused !== bPaused) return aPaused ? -1 : 1;
             return a.name.localeCompare(b.name);
         });
 
         // Render activities
         activitiesList.innerHTML = activityMetrics.map(activity => {
             const hasRunningTimer = runningTimers[activity.id];
+            const hasPausedTimer = pausedTimers[activity.id];
             // Only flag below-average if a declining split covers >= WARNING_THRESHOLD_PERCENT of total time
             const isBelowAverage = !hasRunningTimer && activity.sessionCount > 0 && activity.splitResult !== null
                 && activity.splitResult.recentPercent >= WARNING_THRESHOLD_PERCENT;
@@ -796,21 +840,27 @@ async function loadActivities() {
                 : 'Most Recent';
             let timerDisplay = '';
             
-            if (hasRunningTimer) {
+            if (hasPausedTimer && hasRunningTimer) {
+                timerDisplay = `<span class="timer-badge">⏸ ${formatElapsedHms(hasPausedTimer.elapsedSeconds)} (stopped)</span>`;
+            } else if (hasRunningTimer) {
                 const elapsed = Math.floor((Date.now() - hasRunningTimer.startTime) / 1000);
-                const hours = Math.floor(elapsed / 3600);
-                const minutes = Math.floor((elapsed % 3600) / 60);
-                const seconds = elapsed % 60;
-                timerDisplay = `<span class="timer-badge">⏱ ${String(hours).padStart(2, '0')}:${String(minutes).padStart(2, '0')}:${String(seconds).padStart(2, '0')}</span>`;
+                timerDisplay = `<span class="timer-badge">⏱ ${formatElapsedHms(elapsed)}</span>`;
+            } else if (hasPausedTimer) {
+                timerDisplay = `<span class="timer-badge">⏸ ${formatElapsedHms(hasPausedTimer.elapsedSeconds)} (stopped)</span>`;
             }
             
             // Timer control button
-            const timerButton = hasRunningTimer 
-                ? `<button class="timer-control-btn stop" onclick="event.stopPropagation(); stopTimerFromCard('${activity.id}', '${activity.name.replace(/'/g, "\\'")}')\">⏹ Stop</button>`
-                : `<button class="timer-control-btn start" onclick="event.stopPropagation(); startTimerFromCard('${activity.id}', '${activity.name.replace(/'/g, "\\'")}')\">▶ Start</button>`;
+            const escapedName = activity.name.replace(/'/g, "\\'");
+            const timerButton = (hasPausedTimer && hasRunningTimer)
+                ? `<button class="timer-control-btn start" onclick="event.stopPropagation(); startTimerFromCard('${activity.id}', '${escapedName}')">▶ Resume</button>`
+                : hasRunningTimer
+                ? `<button class="timer-control-btn stop" onclick="event.stopPropagation(); stopTimerFromCard('${activity.id}', '${escapedName}')">⏹ Stop</button>`
+                : hasPausedTimer
+                    ? `<button class="timer-control-btn start" onclick="event.stopPropagation(); startTimerFromCard('${activity.id}', '${escapedName}')">▶ Resume</button>`
+                    : `<button class="timer-control-btn start" onclick="event.stopPropagation(); startTimerFromCard('${activity.id}', '${escapedName}')">▶ Start</button>`;
             
             return `
-                <div class="activity-card ${hasRunningTimer ? 'timer-running' : ''} ${isBelowAverage ? 'below-average-card' : ''}" onclick="openActivity('${activity.id}', '${activity.name.replace(/'/g, "\\'")}')">
+                <div class="activity-card ${hasRunningTimer ? 'timer-running' : ''} ${isBelowAverage ? 'below-average-card' : ''}" data-activity-id="${activity.id}" onclick="openActivity('${activity.id}', '${activity.name.replace(/'/g, "\\'")}')">
                     <div class="activity-header">
                         <h3>${activity.name}${timerDisplay}</h3>
                         ${timerButton}
@@ -909,22 +959,44 @@ async function openActivity(activityId, activityName) {
         clearInterval(timerInterval);
         timerInterval = null;
     }
-    
-    // Check if this activity has a running timer
-    if (runningTimers[activityId]) {
+
+    // If stopped-for-rating, keep background timer running but pause on-screen counter.
+    if (pausedTimers[activityId] && runningTimers[activityId]) {
+        timerState.running = false;
+        timerState.startTime = runningTimers[activityId].startTime;
+        timerState.elapsed = Math.max(0, Math.floor(pausedTimers[activityId].elapsedSeconds || 0));
+        document.getElementById('timerDisplay').textContent = formatElapsedHms(timerState.elapsed);
+        document.getElementById('startTimerBtn').textContent = '▶ Resume';
+        document.getElementById('startTimerBtn').classList.remove('hidden');
+        document.getElementById('stopTimerBtn').classList.add('hidden');
+    } else if (runningTimers[activityId]) {
         timerState.running = true;
         timerState.startTime = runningTimers[activityId].startTime;
         timerState.elapsed = Math.floor((Date.now() - timerState.startTime) / 1000);
         
         document.getElementById('startTimerBtn').classList.add('hidden');
         document.getElementById('stopTimerBtn').classList.remove('hidden');
+        document.getElementById('startTimerBtn').textContent = 'Start Timer';
         
         timerInterval = setInterval(updateTimerDisplay, 100);
+    } else if (pausedTimers[activityId]) {
+        timerState.running = false;
+        timerState.startTime = null;
+        timerState.elapsed = Math.max(0, Math.floor(pausedTimers[activityId].elapsedSeconds || 0));
+        document.getElementById('timerDisplay').textContent = formatElapsedHms(timerState.elapsed);
+        const pausedTotalMinutes = Math.floor(timerState.elapsed / 60);
+        document.getElementById('manualHours').value = Math.floor(pausedTotalMinutes / 60);
+        document.getElementById('manualMinutes').value = pausedTotalMinutes % 60;
+        document.getElementById('startTimerBtn').textContent = '▶ Resume';
+        document.getElementById('startTimerBtn').classList.remove('hidden');
+        document.getElementById('stopTimerBtn').classList.add('hidden');
     } else {
         // Reset timer if no running timer for this activity
         timerState.running = false;
+        timerState.startTime = null;
         timerState.elapsed = 0;
         document.getElementById('timerDisplay').textContent = '00:00:00';
+        document.getElementById('startTimerBtn').textContent = 'Start Timer';
         document.getElementById('startTimerBtn').classList.remove('hidden');
         document.getElementById('stopTimerBtn').classList.add('hidden');
     }
@@ -1092,9 +1164,35 @@ async function startTimer() {
         clearInterval(timerInterval);
         timerInterval = null;
     }
+
+    // Explicit resume path: unfreeze UI while keeping existing background timer.
+    if (currentActivity && pausedTimers[currentActivity.id] && runningTimers[currentActivity.id]) {
+        delete pausedTimers[currentActivity.id];
+        if (pendingRatingActivityId === currentActivity.id) {
+            pendingRatingActivityId = null;
+        }
+        timerState.running = true;
+        timerState.startTime = runningTimers[currentActivity.id].startTime;
+        timerState.elapsed = Math.floor((Date.now() - timerState.startTime) / 1000);
+        document.getElementById('startTimerBtn').textContent = 'Start Timer';
+        document.getElementById('startTimerBtn').classList.add('hidden');
+        document.getElementById('stopTimerBtn').classList.remove('hidden');
+        timerInterval = setInterval(updateTimerDisplay, 100);
+        loadActivities();
+        return;
+    }
     
+    const paused = currentActivity ? pausedTimers[currentActivity.id] : null;
+    const resumeElapsed = paused ? Math.max(0, Math.floor(paused.elapsedSeconds || 0)) : timerState.elapsed;
     timerState.running = true;
-    timerState.startTime = Date.now() - (timerState.elapsed * 1000);
+    timerState.startTime = Date.now() - (resumeElapsed * 1000);
+
+    if (currentActivity && pausedTimers[currentActivity.id]) {
+        delete pausedTimers[currentActivity.id];
+    }
+    if (currentActivity && pendingRatingActivityId === currentActivity.id) {
+        pendingRatingActivityId = null;
+    }
     
     // Save to running timers
     runningTimers[currentActivity.id] = {
@@ -1127,23 +1225,30 @@ async function stopTimer() {
     // Pre-fill manual entry with timer values (already filled by updateTimerDisplay)
     document.getElementById('manualHours').value = hours;
     document.getElementById('manualMinutes').value = minutes;
-    
-    // Remove from running timers
-    if (currentActivity) {
-        delete runningTimers[currentActivity.id];
-        localStorage.setItem('runningTimers', JSON.stringify(runningTimers));
-        await removeTimerFromSheet(currentActivity.id);
-        await notifyNativeTimerStop(currentActivity.id);
-    }
 
-    // Reset timer display and state
-    timerState.elapsed = 0;
-    document.getElementById('timerDisplay').textContent = '00:00:00';
+    if (currentActivity) {
+        pausedTimers[currentActivity.id] = {
+            elapsedSeconds: totalSeconds,
+            activityName: currentActivity.name
+        };
+    }
+    
+    // Keep timer running in background. Only pause on-screen counting.
+    timerState.elapsed = totalSeconds;
+    document.getElementById('timerDisplay').textContent = formatElapsedHms(totalSeconds);
     document.getElementById('startTimerBtn').classList.remove('hidden');
+    document.getElementById('startTimerBtn').textContent = '▶ Resume';
     document.getElementById('stopTimerBtn').classList.add('hidden');
     
     // Scroll to manual entry
     document.getElementById('manualEntryForm').scrollIntoView({ behavior: 'smooth', block: 'center' });
+
+    // User must save a rating before leaving activity detail.
+    if (currentActivity) {
+        pendingRatingActivityId = currentActivity.id;
+    }
+
+    loadActivities();
 }
 
 function updateTimerDisplay() {
@@ -1154,7 +1259,7 @@ function updateTimerDisplay() {
     const minutes = Math.floor((totalSeconds % 3600) / 60);
     const seconds = totalSeconds % 60;
     
-    const display = `${String(hours).padStart(2, '0')}:${String(minutes).padStart(2, '0')}:${String(seconds).padStart(2, '0')}`;
+    const display = formatElapsedHms(totalSeconds);
     document.getElementById('timerDisplay').textContent = display;
     
     // Update manual entry fields in real-time
@@ -1197,6 +1302,13 @@ async function saveSession(durationMinutes, rewardRating) {
 
 // Page Navigation
 function showPage(pageId) {
+    const activePage = document.querySelector('.page.active');
+    const leavingActivityDetail = activePage && activePage.id === 'activityDetailPage' && pageId !== 'activityDetailPage';
+    if (leavingActivityDetail && pendingRatingActivityId && currentActivity && pendingRatingActivityId === currentActivity.id) {
+        alert('Please click Resume or save your rating before leaving this screen.');
+        return;
+    }
+
     document.querySelectorAll('.page').forEach(page => {
         page.classList.remove('active');
     });
@@ -1204,7 +1316,7 @@ function showPage(pageId) {
     
     // Reload activities when returning to home page
     if (pageId === 'homePage' && isAuthenticated) {
-        loadActivities();
+        refreshHomeTimersFromSheet();
     }
 }
 
@@ -1323,24 +1435,36 @@ document.addEventListener('DOMContentLoaded', () => {
             return;
         }
         
-        // Stop the timer if running for this activity
-        if (currentActivity && runningTimers[currentActivity.id]) {
-            delete runningTimers[currentActivity.id];
-            localStorage.setItem('runningTimers', JSON.stringify(runningTimers));
-            
-            // Hide stop button and show start button
-            document.getElementById('stopTimerBtn').classList.add('hidden');
-            document.getElementById('startTimerBtn').classList.remove('hidden');
-            
-            // Stop the timer interval if it's running
-            if (timerState.running) {
-                timerState.running = false;
-                clearInterval(timerInterval);
-            }
-        }
-        
         const success = await saveSession(totalMinutes, reward);
         if (success) {
+            if (currentActivity) {
+                delete pausedTimers[currentActivity.id];
+                if (pendingRatingActivityId === currentActivity.id) {
+                    pendingRatingActivityId = null;
+                }
+            }
+
+            // Stop the timer only after session save succeeds.
+            if (currentActivity && runningTimers[currentActivity.id]) {
+                delete runningTimers[currentActivity.id];
+                localStorage.setItem('runningTimers', JSON.stringify(runningTimers));
+                await removeTimerFromSheet(currentActivity.id);
+                await notifyNativeTimerStop(currentActivity.id);
+            }
+
+            // Ensure detail page controls reflect stopped state.
+            document.getElementById('stopTimerBtn').classList.add('hidden');
+            document.getElementById('startTimerBtn').classList.remove('hidden');
+            if (timerInterval) {
+                clearInterval(timerInterval);
+                timerInterval = null;
+            }
+            timerState.running = false;
+            timerState.startTime = null;
+            timerState.elapsed = 0;
+            document.getElementById('timerDisplay').textContent = '00:00:00';
+            document.getElementById('startTimerBtn').textContent = 'Start Timer';
+
             // Reset form
             document.getElementById('manualHours').value = 0;
             document.getElementById('manualMinutes').value = 0;
@@ -1368,6 +1492,11 @@ document.addEventListener('DOMContentLoaded', () => {
             updateRunningTimerDisplays();
         }
     }, 1000);
+
+    // Pull running timer state from sheet periodically for cross-device live sync.
+    setInterval(() => {
+        refreshHomeTimersFromSheet();
+    }, 5000);
 });
 
 // Update running timer displays on main screen
@@ -1375,28 +1504,90 @@ function updateRunningTimerDisplays() {
     Object.keys(runningTimers).forEach(activityId => {
         const timerBadge = document.querySelector(`[onclick*="${activityId}"] .timer-badge`);
         if (timerBadge) {
-            const elapsed = Math.floor((Date.now() - runningTimers[activityId].startTime) / 1000);
-            const hours = Math.floor(elapsed / 3600);
-            const minutes = Math.floor((elapsed % 3600) / 60);
-            const seconds = elapsed % 60;
-            timerBadge.textContent = `⏱ ${String(hours).padStart(2, '0')}:${String(minutes).padStart(2, '0')}:${String(seconds).padStart(2, '0')}`;
+            if (pausedTimers[activityId]) {
+                const frozen = Math.max(0, Math.floor(pausedTimers[activityId].elapsedSeconds || 0));
+                timerBadge.textContent = `⏸ ${formatElapsedHms(frozen)} (stopped)`;
+            } else {
+                const elapsed = Math.floor((Date.now() - runningTimers[activityId].startTime) / 1000);
+                timerBadge.textContent = `⏱ ${formatElapsedHms(elapsed)}`;
+            }
         }
     });
 }
 
+function scrollActivityCardToCenter(activityId) {
+    const cards = document.querySelectorAll('.activity-card');
+    const targetCard = Array.from(cards).find(card => card.dataset.activityId === activityId);
+    if (!targetCard) return;
+    targetCard.scrollIntoView({ behavior: 'smooth', block: 'center' });
+}
+
+function renderCardRunningState(activityId, activityName, startTime) {
+    const cards = document.querySelectorAll('.activity-card');
+    const card = Array.from(cards).find(c => c.dataset.activityId === activityId);
+    if (!card) return;
+
+    card.classList.add('timer-running');
+
+    const badge = card.querySelector('.timer-badge');
+    const elapsed = Math.floor((Date.now() - startTime) / 1000);
+    const badgeHtml = `⏱ ${formatElapsedHms(elapsed)}`;
+    if (badge) {
+        badge.textContent = badgeHtml;
+    } else {
+        const title = card.querySelector('h3');
+        if (title) {
+            title.insertAdjacentHTML('beforeend', ` <span class="timer-badge">${badgeHtml}</span>`);
+        }
+    }
+
+    const escapedName = activityName.replace(/'/g, "\\'");
+    const controlBtn = card.querySelector('.timer-control-btn');
+    if (controlBtn) {
+        controlBtn.className = 'timer-control-btn stop';
+        controlBtn.setAttribute('onclick', `event.stopPropagation(); stopTimerFromCard('${activityId}', '${escapedName}')`);
+        controlBtn.textContent = '⏹ Stop';
+    }
+}
+
 // Start timer from activity card on main screen
 async function startTimerFromCard(activityId, activityName) {
-    const startTime = Date.now();
+    if (pausedTimers[activityId] && runningTimers[activityId]) {
+        delete pausedTimers[activityId];
+        if (pendingRatingActivityId === activityId) {
+            pendingRatingActivityId = null;
+        }
+        renderCardRunningState(activityId, activityName, runningTimers[activityId].startTime);
+        scrollActivityCardToCenter(activityId);
+        loadActivities().then(() => scrollActivityCardToCenter(activityId)).catch(() => {});
+        return;
+    }
+
+    const paused = pausedTimers[activityId];
+    const resumeElapsed = paused ? Math.max(0, Math.floor(paused.elapsedSeconds || 0)) : 0;
+    const startTime = Date.now() - (resumeElapsed * 1000);
+
+    if (pausedTimers[activityId]) {
+        delete pausedTimers[activityId];
+    }
+    if (pendingRatingActivityId === activityId) {
+        pendingRatingActivityId = null;
+    }
+
     runningTimers[activityId] = {
         startTime: startTime,
         activityName: activityName
     };
     localStorage.setItem('runningTimers', JSON.stringify(runningTimers));
-    await saveTimerToSheet(activityId, activityName, startTime);
-    await notifyNativeTimerStart(activityId, activityName, startTime);
+    renderCardRunningState(activityId, activityName, startTime);
+    scrollActivityCardToCenter(activityId);
+
+    // Persist and sync without blocking immediate UI response.
+    saveTimerToSheet(activityId, activityName, startTime).catch(() => {});
+    notifyNativeTimerStart(activityId, activityName, startTime).catch(() => {});
 
     // Refresh activities list to show timer
-    loadActivities();
+    loadActivities().then(() => scrollActivityCardToCenter(activityId)).catch(() => {});
 }
 
 // Stop timer from activity card on main screen
@@ -1410,25 +1601,24 @@ async function stopTimerFromCard(activityId, activityName) {
     const totalSeconds = Math.floor((Date.now() - timerData.startTime) / 1000);
     const hours = Math.floor(totalSeconds / 3600);
     const minutes = Math.floor((totalSeconds % 3600) / 60);
-    
-    // Remove from running timers
-    delete runningTimers[activityId];
-    localStorage.setItem('runningTimers', JSON.stringify(runningTimers));
-    await removeTimerFromSheet(activityId);
-    await notifyNativeTimerStop(activityId);
 
+    // Keep timer running in background. Only pause UI until save or resume.
+    pausedTimers[activityId] = {
+        elapsedSeconds: totalSeconds,
+        activityName
+    };
+    pendingRatingActivityId = activityId;
+    
     // Refresh activities list
     loadActivities();
-    
-    // Open activity to save the session
+
+    // Open activity detail so user can resume or save rating.
     openActivity(activityId, activityName);
-    
-    // Pre-fill the manual entry form with elapsed time
-    // Wait a bit for the page to load
+
+    // Pre-fill rating form duration from paused elapsed time.
     setTimeout(() => {
         document.getElementById('manualHours').value = hours;
         document.getElementById('manualMinutes').value = minutes;
-        // Scroll to manual entry
         document.getElementById('manualEntryForm').scrollIntoView({ behavior: 'smooth', block: 'center' });
     }, 100);
 }

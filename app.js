@@ -1394,7 +1394,7 @@ async function addActivity(activityName) {
             }
         });
         
-        return true;
+        return activityId;
     } catch (error) {
         console.error('Error adding activity:', error);
         
@@ -1881,12 +1881,13 @@ document.addEventListener('DOMContentLoaded', () => {
         const activityName = document.getElementById('activityNameInline').value.trim();
         
         if (activityName) {
-            const success = await addActivity(activityName);
-            if (success) {
+            const addedActivityId = await addActivity(activityName);
+            if (addedActivityId) {
                 document.getElementById('activityNameInline').value = '';
                 document.getElementById('addActivityBtn').classList.remove('hidden');
                 document.getElementById('addActivityInline').classList.add('hidden');
-                loadActivities();
+                await loadActivities();
+                scrollActivityCardToCenter(addedActivityId);
             }
         }
     };

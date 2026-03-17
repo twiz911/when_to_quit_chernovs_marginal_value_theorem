@@ -13,7 +13,8 @@ const SPREADSHEET_ID = '1UYVZMilFCtTNoFimamdNYkGXRcw-N72GiQyckBEGv_c';
 
 // Only show the "consider quitting" warning when the declining recent
 // portion covers at least this percentage of total time.
-const WARNING_THRESHOLD_PERCENT = 20;
+const DEFAULT_WARNING_THRESHOLD_PERCENT = 20;
+let WARNING_THRESHOLD_PERCENT = DEFAULT_WARNING_THRESHOLD_PERCENT;
 
 const DISCOVERY_DOCS = ['https://sheets.googleapis.com/$discovery/rest?version=v4'];
 const SCOPES = 'https://www.googleapis.com/auth/spreadsheets';
@@ -68,9 +69,18 @@ let errorShown = false; // Track if error modal already shown
 let authInProgress = false;
 let oauthErrorSeen = false;
 let pendingRatingActivityId = null;
+let settingsPanelOpen = false;
 let runningTimers = JSON.parse(localStorage.getItem('runningTimers')) || {}; // { activityId: { startTime, elapsed, activityName } }
 let pausedTimers = {}; // in-memory only; cleared on reload if no save
 let homeTimersSyncInFlight = false;
+let saveRatingInFlight = false;
+let readQuotaBackoffUntil = 0;
+let readQuotaWarningShown = false;
+let lastHomeActivitiesRefreshAt = 0;
+
+const HOME_TIMER_SYNC_INTERVAL_MS = 15000;
+const HOME_ACTIVITIES_REFRESH_MS = 60000;
+const QUOTA_BACKOFF_MS = 65000;
 
 // ─── Capacitor native bridge (graceful no-op in browser) ─────────────────────
 const TimerPlugin = (() => {
@@ -106,6 +116,145 @@ function formatElapsedHms(totalSeconds) {
     return days > 0 ? `${days}d ${hms}` : hms;
 }
 
+function formatDurationMinutesDhm(totalMinutes) {
+    const safe = Math.max(0, Math.floor(totalMinutes || 0));
+    const days = Math.floor(safe / (24 * 60));
+    const rem = safe % (24 * 60);
+    const hours = Math.floor(rem / 60);
+    const minutes = rem % 60;
+    return `${days}d ${hours}h ${minutes}m`;
+}
+
+function parseNonNegativeInt(value) {
+    const parsed = parseInt(value, 10);
+    return Number.isFinite(parsed) ? Math.max(0, parsed) : 0;
+}
+
+function setManualDurationFromSeconds(totalSeconds) {
+    const totalMinutes = Math.max(0, Math.floor((totalSeconds || 0) / 60));
+    const days = Math.floor(totalMinutes / (24 * 60));
+    const remainderMinutes = totalMinutes % (24 * 60);
+    const hours = Math.floor(remainderMinutes / 60);
+    const minutes = remainderMinutes % 60;
+
+    const daysEl = document.getElementById('manualDays');
+    const hoursEl = document.getElementById('manualHours');
+    const minutesEl = document.getElementById('manualMinutes');
+    if (daysEl) daysEl.value = days;
+    if (hoursEl) hoursEl.value = hours;
+    if (minutesEl) minutesEl.value = minutes;
+
+    updateSaveRatingButtonState();
+}
+
+function getManualDurationMinutes() {
+    const days = parseNonNegativeInt(document.getElementById('manualDays')?.value);
+    const hours = parseNonNegativeInt(document.getElementById('manualHours')?.value);
+    const minutes = parseNonNegativeInt(document.getElementById('manualMinutes')?.value);
+    return (days * 24 * 60) + (hours * 60) + minutes;
+}
+
+function updateSaveRatingButtonState() {
+    const saveBtn = document.querySelector('#manualEntryForm button[type="submit"]');
+    if (!saveBtn) return;
+    const totalMinutes = getManualDurationMinutes();
+    saveBtn.disabled = saveRatingInFlight || totalMinutes === 0;
+}
+
+function enforceCompactDurationInputs() {
+    const row = document.querySelector('#manualEntryForm .duration-row');
+    if (!row) return;
+
+    row.style.display = 'flex';
+    row.style.flexWrap = 'nowrap';
+    row.style.justifyContent = 'center';
+    row.style.alignItems = 'flex-end';
+    row.style.gap = '0.25rem';
+
+    const isSmall = window.innerWidth <= 400;
+    const width = isSmall ? '3rem' : '3rem';
+
+    row.querySelectorAll('.form-group').forEach((group) => {
+        group.style.flex = '0 0 auto';
+        group.style.width = width;
+        group.style.minWidth = width;
+        group.style.maxWidth = width;
+        group.style.marginBottom = '0.4rem';
+    });
+
+    row.querySelectorAll('label').forEach((label) => {
+        label.style.fontSize = '0.875rem';
+        label.style.marginBottom = '0.2rem';
+        label.style.textAlign = 'center';
+    });
+
+    ['manualDays', 'manualHours', 'manualMinutes'].forEach((id) => {
+        const el = document.getElementById(id);
+        if (!el) return;
+        el.style.width = width;
+        el.style.minWidth = width;
+        el.style.maxWidth = width;
+        el.style.padding = '0.15rem 0.2rem';
+        el.style.height = '1.85rem';
+        el.style.fontSize = '1rem';
+        el.style.textAlign = 'center';
+        el.style.boxSizing = 'border-box';
+    });
+}
+
+function sleep(ms) {
+    return new Promise(resolve => setTimeout(resolve, ms));
+}
+
+function getApiErrorStatus(error) {
+    return Number(error?.status || error?.result?.error?.code || 0);
+}
+
+function isRetryableApiError(error) {
+    const status = getApiErrorStatus(error);
+    return [429, 500, 502, 503, 504].includes(status);
+}
+
+function isReadQuotaExceededError(error) {
+    const status = getApiErrorStatus(error);
+    const message = (error?.result?.error?.message || error?.message || '').toLowerCase();
+    if (status === 429) return true;
+    return message.includes('quota exceeded') || message.includes('read requests per minute per user');
+}
+
+function getRunningTimersFingerprint() {
+    return Object.entries(runningTimers || {})
+        .sort((a, b) => a[0].localeCompare(b[0]))
+        .map(([id, t]) => `${id}:${Number(t?.startTime || 0)}`)
+        .join('|');
+}
+
+function handleReadQuotaExceeded(context, error) {
+    readQuotaBackoffUntil = Date.now() + QUOTA_BACKOFF_MS;
+    if (!readQuotaWarningShown) {
+        readQuotaWarningShown = true;
+        showError('Google Sheets read-rate limit reached. Auto-retrying in about a minute.');
+    }
+    console.warn(`${context}: read quota exceeded`, error);
+}
+
+async function runWithApiRetries(task, label, maxRetries = 3, baseDelayMs = 400) {
+    let attempt = 0;
+    while (true) {
+        try {
+            return await task();
+        } catch (error) {
+            if (!isRetryableApiError(error) || attempt >= maxRetries) {
+                throw error;
+            }
+            const delayMs = baseDelayMs * Math.pow(2, attempt);
+            console.warn(`${label} failed with retryable status ${getApiErrorStatus(error)}. Retrying in ${delayMs}ms...`);
+            await sleep(delayMs);
+            attempt += 1;
+        }
+    }
+}
+
 async function syncRunningTimersToNativeNotifications(forceReconcile = false) {
     if (!TimerPlugin) return;
 
@@ -118,7 +267,7 @@ async function syncRunningTimersToNativeNotifications(forceReconcile = false) {
     const entries = Object.entries(runningTimers || {});
     for (const [activityId, timer] of entries) {
         const startTime = Number(timer?.startTime);
-        const activityName = timer?.activityName || 'Activity';
+        const activityName = getKnownActivityName(activityId, timer?.activityName || 'Activity');
         if (!activityId || !Number.isFinite(startTime) || startTime <= 0) continue;
         await notifyNativeTimerStart(activityId, activityName, startTime);
     }
@@ -128,6 +277,26 @@ async function syncActivitiesToNative(activities) {
     if (!TimerPlugin) return;
     try { await TimerPlugin.syncActivities({ activities }); }
     catch (e) { console.warn('TimerPlugin.syncActivities:', e); }
+}
+
+async function syncNativeAuthContext() {
+    if (!TimerPlugin) return;
+    const accessToken = gapi?.client?.getToken?.()?.access_token;
+    if (!spreadsheetId || !accessToken) return;
+    try {
+        await TimerPlugin.syncAuthContext({ spreadsheetId, accessToken });
+    } catch (e) {
+        console.warn('TimerPlugin.syncAuthContext:', e);
+    }
+}
+
+async function clearNativeAuthContext() {
+    if (!TimerPlugin) return;
+    try {
+        await TimerPlugin.clearAuthContext();
+    } catch (e) {
+        console.warn('TimerPlugin.clearAuthContext:', e);
+    }
 }
 
 async function checkNativeLaunchIntent() {
@@ -233,6 +402,7 @@ function handleTokenExpiration() {
     console.log('Token expired or invalid, clearing and requesting new token');
     localStorage.removeItem('gapiToken');
     gapi.client.setToken(null);
+    clearNativeAuthContext();
     isAuthenticated = false;
     // Reload page to re-authenticate
     window.location.reload();
@@ -467,6 +637,7 @@ async function initializeApp() {
         
         // Check if we have a valid access token
         if (!tokenValid || gapi.client.getToken() === null) {
+            await clearNativeAuthContext();
             setRetryButtonForSignIn();
             if (!oauthErrorSeen) {
                 // Redirect-based auth can be auto-started when not signed in.
@@ -476,11 +647,15 @@ async function initializeApp() {
             showError('Tap "Connect Google" below to sign in. This uses full-page redirect (no popup).');
         } else {
             await setupSpreadsheet();
+            await loadWarningThresholdSetting();
+            renderWarningThresholdSettings();
+            await syncNativeAuthContext();
             updateSpreadsheetLink();
             await loadTimersFromSheet();
             await syncRunningTimersToNativeNotifications();
             await loadActivities();
             isAuthenticated = true;
+            renderWarningThresholdSettings();
             enableAppButtons();
             checkNativeLaunchIntent();
             setRetryButtonForRetry();
@@ -578,6 +753,8 @@ async function setupSpreadsheet() {
     }
     // Ensure Timers sheet exists (for both new and existing spreadsheets)
     await ensureTimersSheet();
+    // Ensure Settings sheet exists (for both new and existing spreadsheets)
+    await ensureSettingsSheet();
 }
 
 // Create the Timers sheet if it doesn't already exist
@@ -585,7 +762,7 @@ async function ensureTimersSheet() {
     try {
         await gapi.client.sheets.spreadsheets.values.get({
             spreadsheetId: spreadsheetId,
-            range: 'Timers!A1:C1',
+            range: 'Timers!A1:B1',
         });
     } catch (e) {
         // Sheet doesn't exist — create it
@@ -596,9 +773,9 @@ async function ensureTimersSheet() {
             });
             await gapi.client.sheets.spreadsheets.values.update({
                 spreadsheetId: spreadsheetId,
-                range: 'Timers!A1:C1',
+                range: 'Timers!A1:B1',
                 valueInputOption: 'RAW',
-                resource: { values: [['Activity ID', 'Activity Name', 'Start Time']] }
+                resource: { values: [['Activity ID', 'Start Time']] }
             });
         } catch (err) {
             console.warn('Could not create Timers sheet:', err);
@@ -606,14 +783,236 @@ async function ensureTimersSheet() {
     }
 }
 
+// Create the Settings sheet if it doesn't already exist
+async function ensureSettingsSheet() {
+    try {
+        await gapi.client.sheets.spreadsheets.values.get({
+            spreadsheetId: spreadsheetId,
+            range: 'Settings!A1:B1',
+        });
+    } catch (e) {
+        try {
+            await gapi.client.sheets.spreadsheets.batchUpdate({
+                spreadsheetId: spreadsheetId,
+                resource: { requests: [{ addSheet: { properties: { title: 'Settings' } } }] }
+            });
+            await gapi.client.sheets.spreadsheets.values.update({
+                spreadsheetId: spreadsheetId,
+                range: 'Settings!A1:B1',
+                valueInputOption: 'RAW',
+                resource: { values: [['Setting', 'Value']] }
+            });
+        } catch (err) {
+            console.warn('Could not create Settings sheet:', err);
+        }
+    }
+}
+
+async function loadWarningThresholdSetting() {
+    try {
+        const resp = await gapi.client.sheets.spreadsheets.values.get({
+            spreadsheetId: spreadsheetId,
+            range: 'Settings!A2:B',
+        });
+
+        const rows = resp.result.values || [];
+        const row = rows.find((r) => r[0] === 'WARNING_THRESHOLD_PERCENT');
+
+        if (!row) {
+            await gapi.client.sheets.spreadsheets.values.append({
+                spreadsheetId: spreadsheetId,
+                range: 'Settings!A:B',
+                valueInputOption: 'RAW',
+                resource: { values: [['WARNING_THRESHOLD_PERCENT', DEFAULT_WARNING_THRESHOLD_PERCENT]] }
+            });
+            WARNING_THRESHOLD_PERCENT = DEFAULT_WARNING_THRESHOLD_PERCENT;
+            return;
+        }
+
+        const parsed = Number(row[1]);
+        WARNING_THRESHOLD_PERCENT = (Number.isFinite(parsed) && parsed >= 0)
+            ? parsed
+            : DEFAULT_WARNING_THRESHOLD_PERCENT;
+    } catch (e) {
+        console.warn('Could not load WARNING_THRESHOLD_PERCENT setting:', e);
+        WARNING_THRESHOLD_PERCENT = DEFAULT_WARNING_THRESHOLD_PERCENT;
+    } finally {
+        renderWarningThresholdSettings();
+    }
+}
+
+function renderWarningThresholdSettings() {
+    const modal = document.getElementById('settingsModal');
+    const input = document.getElementById('warningThresholdInput');
+    const status = document.getElementById('warningThresholdStatus');
+    const saveBtn = document.getElementById('saveWarningThresholdBtn');
+    const toggleBtn = document.getElementById('settingsToggleBtn');
+    const value = Math.max(0, Math.floor(WARNING_THRESHOLD_PERCENT || 0));
+    const canShow = isAuthenticated && settingsPanelOpen;
+
+    if (modal) {
+        modal.classList.toggle('hidden', !canShow);
+        modal.setAttribute('aria-hidden', canShow ? 'false' : 'true');
+    }
+
+    if (input) {
+        input.value = String(value);
+        input.disabled = !isAuthenticated;
+    }
+    if (status) {
+        status.textContent = `Current: ${value}%`;
+    }
+    if (saveBtn) {
+        saveBtn.disabled = !isAuthenticated;
+    }
+    if (toggleBtn) {
+        toggleBtn.setAttribute('aria-expanded', canShow ? 'true' : 'false');
+    }
+}
+
+function toggleWarningThresholdPanel() {
+    if (!isAuthenticated) return;
+    settingsPanelOpen = !settingsPanelOpen;
+    renderWarningThresholdSettings();
+    pinSettingsControlsTopRight();
+}
+
+function closeWarningThresholdPanel() {
+    if (!settingsPanelOpen) return;
+    settingsPanelOpen = false;
+    renderWarningThresholdSettings();
+}
+
+function pinSettingsControlsTopRight() {
+    const safeRight = 'max(0px, env(safe-area-inset-right))';
+
+    const headerRow = document.querySelector('.home-header-row');
+    if (headerRow) {
+        headerRow.style.setProperty('position', 'relative', 'important');
+        headerRow.style.setProperty('padding-right', `calc(3.35rem + ${safeRight})`, 'important');
+    }
+
+    const cog = document.getElementById('settingsToggleBtn');
+    if (cog) {
+        cog.style.setProperty('position', 'absolute', 'important');
+        cog.style.setProperty('top', '0', 'important');
+        cog.style.setProperty('right', safeRight, 'important');
+        cog.style.setProperty('left', 'auto', 'important');
+        cog.style.setProperty('margin', '0', 'important');
+        cog.style.setProperty('width', '1.9em', 'important');
+        cog.style.setProperty('height', '1.9em', 'important');
+        cog.style.setProperty('font-size', '1.45rem', 'important');
+        cog.style.setProperty('z-index', '10', 'important');
+    }
+
+    const modalHeader = document.querySelector('.settings-modal-header');
+    if (modalHeader) {
+        modalHeader.style.setProperty('position', 'relative', 'important');
+        modalHeader.style.setProperty('padding-right', `calc(3rem + ${safeRight})`, 'important');
+        modalHeader.style.setProperty('min-height', '2.9rem', 'important');
+    }
+
+    const closeBtn = document.getElementById('settingsCloseBtn');
+    if (closeBtn) {
+        closeBtn.style.setProperty('position', 'absolute', 'important');
+        closeBtn.style.setProperty('top', '0', 'important');
+        closeBtn.style.setProperty('right', safeRight, 'important');
+        closeBtn.style.setProperty('left', 'auto', 'important');
+        closeBtn.style.setProperty('margin', '0', 'important');
+        closeBtn.style.setProperty('width', '2.6rem', 'important');
+        closeBtn.style.setProperty('height', '2.6rem', 'important');
+        closeBtn.style.setProperty('font-size', '1.25rem', 'important');
+        closeBtn.style.setProperty('z-index', '10', 'important');
+    }
+}
+
+function getKnownActivityName(activityId, fallback = 'Activity') {
+    if (!activityId) return fallback;
+    const match = (_allActivitiesCache || []).find((a) => a.id === activityId);
+    return match?.name || fallback;
+}
+
+async function saveWarningThresholdSetting(newPercent) {
+    const safePercent = Math.max(0, Math.floor(newPercent));
+    const resp = await gapi.client.sheets.spreadsheets.values.get({
+        spreadsheetId: spreadsheetId,
+        range: 'Settings!A2:B',
+    });
+
+    const rows = resp.result.values || [];
+    const existingIndex = rows.findIndex((row) => row[0] === 'WARNING_THRESHOLD_PERCENT');
+
+    if (existingIndex >= 0) {
+        const rowNumber = existingIndex + 2;
+        await gapi.client.sheets.spreadsheets.values.update({
+            spreadsheetId: spreadsheetId,
+            range: `Settings!B${rowNumber}`,
+            valueInputOption: 'RAW',
+            resource: { values: [[safePercent]] }
+        });
+    } else {
+        await gapi.client.sheets.spreadsheets.values.append({
+            spreadsheetId: spreadsheetId,
+            range: 'Settings!A:B',
+            valueInputOption: 'RAW',
+            resource: { values: [['WARNING_THRESHOLD_PERCENT', safePercent]] }
+        });
+    }
+}
+
+async function saveWarningThresholdSettingFromUi() {
+    if (!isAuthenticated || !spreadsheetId) {
+        showError('Please connect Google first before saving settings.');
+        return;
+    }
+
+    const input = document.getElementById('warningThresholdInput');
+    const saveBtn = document.getElementById('saveWarningThresholdBtn');
+    if (!input || !saveBtn) return;
+
+    const parsed = Number(input.value);
+    if (!Number.isFinite(parsed) || parsed < 0 || parsed > 50) {
+        showError('Warning threshold must be a number between 0 and 50.');
+        return;
+    }
+
+    const previousLabel = saveBtn.textContent;
+    saveBtn.disabled = true;
+    saveBtn.textContent = 'Saving...';
+
+    try {
+        const safePercent = Math.max(0, Math.floor(parsed));
+        await saveWarningThresholdSetting(safePercent);
+        WARNING_THRESHOLD_PERCENT = safePercent;
+        renderWarningThresholdSettings();
+
+        if (document.getElementById('homePage')?.classList.contains('active')) {
+            await loadActivities();
+        }
+
+        if (currentActivity && document.getElementById('activityDetailPage')?.classList.contains('active')) {
+            await loadActivityDetail(currentActivity.id);
+        }
+    } catch (error) {
+        console.error('Could not save WARNING_THRESHOLD_PERCENT:', error);
+        showError('Failed to save warning threshold setting. Please try again.');
+    } finally {
+        saveBtn.disabled = false;
+        saveBtn.textContent = previousLabel;
+    }
+}
+
 // Write a running timer to the Timers sheet
 async function saveTimerToSheet(activityId, activityName, startTime) {
     try {
+        // Ensure only one active timer row per activity.
+        await removeTimerFromSheet(activityId);
+        // Timers store only activity ID + start time; names come from Activities.
         await gapi.client.sheets.spreadsheets.values.append({
             spreadsheetId: spreadsheetId,
-            range: 'Timers!A:C',
+            range: 'Timers!A:B',
             valueInputOption: 'RAW',
-            resource: { values: [[activityId, activityName, new Date(startTime).toISOString()]] }
+            resource: { values: [[activityId, new Date(startTime).toISOString()]] }
         });
     } catch (e) {
         console.warn('Could not save timer to sheet:', e);
@@ -628,22 +1027,35 @@ async function removeTimerFromSheet(activityId) {
             range: 'Timers!A:C',
         });
         const rows = resp.result.values || [];
-        // rows[0] is header; find data row index (1-based in sheet)
-        const rowIdx = rows.findIndex((r, i) => i > 0 && r[0] === activityId);
-        if (rowIdx === -1) return;
+        // rows[0] is header; collect ALL matching row indices to avoid stale duplicates.
+        const matchingRowIndexes = [];
+        rows.forEach((r, i) => {
+            if (i > 0 && r[0] === activityId) {
+                matchingRowIndexes.push(i);
+            }
+        });
+        if (matchingRowIndexes.length === 0) return;
+
         const meta = await gapi.client.sheets.spreadsheets.get({ spreadsheetId: spreadsheetId });
         const timersSheet = meta.result.sheets.find(s => s.properties.title === 'Timers');
         if (!timersSheet) return;
-        await gapi.client.sheets.spreadsheets.batchUpdate({
-            spreadsheetId: spreadsheetId,
-            resource: {
-                requests: [{ deleteDimension: { range: {
+
+        // Delete from bottom to top so indices stay valid.
+        matchingRowIndexes.sort((a, b) => b - a);
+        const requests = matchingRowIndexes.map((rowIdx) => ({
+            deleteDimension: {
+                range: {
                     sheetId: timersSheet.properties.sheetId,
                     dimension: 'ROWS',
                     startIndex: rowIdx,
                     endIndex: rowIdx + 1
-                } } }]
+                }
             }
+        }));
+
+        await gapi.client.sheets.spreadsheets.batchUpdate({
+            spreadsheetId: spreadsheetId,
+            resource: { requests }
         });
     } catch (e) {
         console.warn('Could not remove timer from sheet:', e);
@@ -653,37 +1065,75 @@ async function removeTimerFromSheet(activityId) {
 // Load running timers from the Timers sheet (cross-device sync)
 async function loadTimersFromSheet() {
     try {
-        const resp = await gapi.client.sheets.spreadsheets.values.get({
+        if (Date.now() < readQuotaBackoffUntil) return;
+        const resp = await runWithApiRetries(async () => gapi.client.sheets.spreadsheets.values.get({
             spreadsheetId: spreadsheetId,
             range: 'Timers!A2:C',
-        });
+        }), 'loadTimersFromSheet', 1, 500);
         const rows = resp.result.values || [];
         // Rebuild runningTimers from sheet data
         Object.keys(runningTimers).forEach(k => delete runningTimers[k]);
+
+        const latestByActivity = {};
         rows.forEach(row => {
             if (row[0]) {
-                runningTimers[row[0]] = {
-                    startTime: new Date(row[2]).getTime(),
-                    activityName: row[1] || ''
-                };
+                const activityId = row[0];
+                // Backward-compatible parse:
+                // New rows: [activityId, startTime]
+                // Legacy rows: [activityId, activityName, startTime]
+                const maybeName = row[2] ? (row[1] || '') : '';
+                const startRaw = row[2] ? row[2] : row[1];
+                const parsed = new Date(startRaw).getTime();
+                const startTime = Number.isFinite(parsed) ? parsed : 0;
+                const activityName = getKnownActivityName(activityId, maybeName || 'Activity');
+
+                const existing = latestByActivity[activityId];
+                if (!existing || startTime > existing.startTime) {
+                    latestByActivity[activityId] = { startTime, activityName };
+                }
             }
         });
+
+        Object.entries(latestByActivity).forEach(([activityId, timer]) => {
+            if (!Number.isFinite(timer.startTime) || timer.startTime <= 0) return;
+            runningTimers[activityId] = {
+                startTime: timer.startTime,
+                activityName: timer.activityName
+            };
+        });
+
         localStorage.setItem('runningTimers', JSON.stringify(runningTimers));
+        readQuotaWarningShown = false;
     } catch (e) {
+        if (isReadQuotaExceededError(e)) {
+            handleReadQuotaExceeded('loadTimersFromSheet', e);
+            return;
+        }
         console.warn('Could not load timers from sheet:', e);
     }
 }
 
 async function refreshHomeTimersFromSheet() {
     if (!isAuthenticated || !spreadsheetId || homeTimersSyncInFlight) return;
+    if (Date.now() < readQuotaBackoffUntil) return;
     const homePage = document.getElementById('homePage');
     if (!homePage || !homePage.classList.contains('active')) return;
 
     homeTimersSyncInFlight = true;
     try {
+        const beforeFingerprint = getRunningTimersFingerprint();
         await loadTimersFromSheet();
         await syncRunningTimersToNativeNotifications(true);
-        await loadActivities();
+        const afterFingerprint = getRunningTimersFingerprint();
+        const now = Date.now();
+        const shouldRefreshActivities =
+            beforeFingerprint !== afterFingerprint ||
+            (now - lastHomeActivitiesRefreshAt) >= HOME_ACTIVITIES_REFRESH_MS;
+
+        if (shouldRefreshActivities) {
+            await loadActivities();
+            lastHomeActivitiesRefreshAt = now;
+        }
     } finally {
         homeTimersSyncInFlight = false;
     }
@@ -745,24 +1195,28 @@ async function loadActivities() {
     const activitiesList = document.getElementById('activitiesList');
     
     try {
+        if (Date.now() < readQuotaBackoffUntil) {
+            return;
+        }
         loadingIndicator.classList.remove('hidden');
         
         // Fetch activities
-        const activitiesResponse = await gapi.client.sheets.spreadsheets.values.get({
+        const activitiesResponse = await runWithApiRetries(async () => gapi.client.sheets.spreadsheets.values.get({
             spreadsheetId: spreadsheetId,
             range: 'Activities!A2:B',
-        });
+        }), 'loadActivities.activities', 1, 500);
         
         // Fetch sessions
-        const sessionsResponse = await gapi.client.sheets.spreadsheets.values.get({
+        const sessionsResponse = await runWithApiRetries(async () => gapi.client.sheets.spreadsheets.values.get({
             spreadsheetId: spreadsheetId,
             range: 'Sessions!A2:E',
-        });
+        }), 'loadActivities.sessions', 1, 500);
         
         const activities = activitiesResponse.result.values || [];
         const sessions = sessionsResponse.result.values || [];
         
         loadingIndicator.classList.add('hidden');
+        readQuotaWarningShown = false;
         
         if (activities.length === 0) {
             activitiesList.innerHTML = `
@@ -803,6 +1257,7 @@ async function loadActivities() {
                 avgRewardPerHour: parseFloat(avgScore.toFixed(2)),
                 lastRewardPerHour: parseFloat(lastScore.toFixed(2)),
                 sessionCount: activitySessions.length,
+                totalMinutes: activitySessions.reduce((sum, s) => sum + parseFloat(s[3] || 0), 0),
                 splitResult
             };
         });
@@ -833,11 +1288,11 @@ async function loadActivities() {
             const isRecentRed = activity.sessionCount > 0 && activity.splitResult !== null
                 && activity.splitResult.recentPercent >= WARNING_THRESHOLD_PERCENT;
             const initialLabel = activity.splitResult
-                ? `Initial ${Math.round(activity.splitResult.initialPercent)}% Average`
-                : 'Average';
+                ? `Initial ${Math.round(activity.splitResult.initialPercent)}% Average Rating`
+                : 'Average Rating';
             const recentLabel = activity.splitResult
-                ? `Most Recent ${Math.round(activity.splitResult.recentPercent)}% Average`
-                : 'Most Recent';
+                ? `Most Recent ${Math.round(activity.splitResult.recentPercent)}% Average Rating`
+                : 'Most Recent Rating';
             let timerDisplay = '';
             
             if (hasPausedTimer && hasRunningTimer) {
@@ -874,6 +1329,10 @@ async function loadActivities() {
                             <div class="metric-label">${recentLabel}</div>
                             <div class="metric-value ${isRecentRed ? 'below-average' : ''}">${activity.splitResult ? activity.lastRewardPerHour.toFixed(2) : (activity.sessionCount > 0 ? '✓' : '--')}</div>
                         </div>
+                        <div class="metric">
+                            <div class="metric-label">Total Time</div>
+                            <div class="metric-value metric-value-time">${formatDurationMinutesDhm(activity.totalMinutes)}</div>
+                        </div>
                     </div>
                 </div>
             `;
@@ -882,6 +1341,11 @@ async function loadActivities() {
     } catch (error) {
         console.error('Error loading activities:', error);
         loadingIndicator.classList.add('hidden');
+
+        if (isReadQuotaExceededError(error)) {
+            handleReadQuotaExceeded('loadActivities', error);
+            return;
+        }
         
         // Check if token expired
         const status = error.status || error.result?.error?.code;
@@ -898,7 +1362,7 @@ async function loadActivities() {
         activitiesList.innerHTML = `
             <div class="empty-state">
                 <div class="empty-state-icon">❌</div>
-                <div class="empty-state-text">Error loading activities.<br>Check the error message above.</div>
+                <div class="empty-state-text">Error aies.<br>Check the error message above.</div>
             </div>
         `;
     }
@@ -984,9 +1448,7 @@ async function openActivity(activityId, activityName) {
         timerState.startTime = null;
         timerState.elapsed = Math.max(0, Math.floor(pausedTimers[activityId].elapsedSeconds || 0));
         document.getElementById('timerDisplay').textContent = formatElapsedHms(timerState.elapsed);
-        const pausedTotalMinutes = Math.floor(timerState.elapsed / 60);
-        document.getElementById('manualHours').value = Math.floor(pausedTotalMinutes / 60);
-        document.getElementById('manualMinutes').value = pausedTotalMinutes % 60;
+        setManualDurationFromSeconds(timerState.elapsed);
         document.getElementById('startTimerBtn').textContent = '▶ Resume';
         document.getElementById('startTimerBtn').classList.remove('hidden');
         document.getElementById('stopTimerBtn').classList.add('hidden');
@@ -1035,20 +1497,16 @@ async function loadActivityDetail(activityId) {
         }
 
         // Format minutes helper
-        const formatMinutes = (mins) => {
-            const hours = Math.floor(mins / 60);
-            const minutes = Math.round(mins % 60);
-            return hours > 0 ? `${hours}h ${minutes}m` : `${minutes}m`;
-        };
+        const formatMinutes = (mins) => formatDurationMinutesDhm(mins);
 
-        // Update stat labels dynamically
+            // Update stat labels dynamically
         const avgScoreLabel = document.getElementById('avgScoreLabel');
         const lastScoreLabel = document.getElementById('lastScoreLabel');
         if (splitResult) {
             const ip = Math.round(splitResult.initialPercent);
             const rp = Math.round(splitResult.recentPercent);
-            if (avgScoreLabel) avgScoreLabel.textContent = `Initial ${ip}% Average`;
-            if (lastScoreLabel) lastScoreLabel.textContent = `Most Recent ${rp}% Average`;
+            if (avgScoreLabel) avgScoreLabel.textContent = `Initial ${ip}% Average Rating`;
+            if (lastScoreLabel) lastScoreLabel.textContent = `Most Recent ${rp}% Average Rating`;
         } else {
             if (avgScoreLabel) avgScoreLabel.textContent = 'Average Rating';
             if (lastScoreLabel) lastScoreLabel.textContent = 'Trend';
@@ -1090,7 +1548,7 @@ async function loadActivityDetail(activityId) {
             const rp = Math.round(splitResult.recentPercent);
             if (warningText) {
                 const pctBelow = Math.round((avgScore - lastScore) / avgScore * 100);
-                warningText.innerHTML = `<strong>Warning!</strong><br>Your most recent ${rp}% of time (${formatMinutes(splitResult.recentMins)}) average rating ${lastScore.toFixed(2)} is ${pctBelow}% below your initial ${ip}% time (${formatMinutes(splitResult.initialMins)}) average rating ${avgScore.toFixed(2)}.<br>Consider switching activities.`;
+                warningText.innerHTML = `<strong>Warning!</strong><br>Your most recent ${rp}% of time (${formatMinutes(splitResult.recentMins)}) average rating ${lastScore.toFixed(2)} is ${pctBelow}% below your initial ${ip}% time (${formatMinutes(splitResult.initialMins)}) average rating ${avgScore.toFixed(2)}.<br/><br/>Consider quitting.`;
             }
             if (warningBox) warningBox.classList.remove('hidden');
         } else {
@@ -1111,9 +1569,7 @@ async function loadActivityDetail(activityId) {
                 const duration = parseFloat(session[3]);
                 const rating = parseFloat(session[4]);
                 const score = duration * rating;
-                const hours = Math.floor(duration / 60);
-                const minutes = Math.round(duration % 60);
-                const durationText = hours > 0 ? `${hours}h ${minutes}m` : `${minutes}m`;
+                const durationText = formatDurationMinutesDhm(duration);
                 const dateRaw = session[2] ? new Date(session[2]) : null;
                 const dateText = dateRaw && !isNaN(dateRaw)
                     ? `${dateRaw.getFullYear()}-${String(dateRaw.getMonth()+1).padStart(2,'0')}-${String(dateRaw.getDate()).padStart(2,'0')} ${String(dateRaw.getHours()).padStart(2,'0')}:${String(dateRaw.getMinutes()).padStart(2,'0')}`
@@ -1219,12 +1675,7 @@ async function stopTimer() {
     }
     
     const totalSeconds = Math.floor((Date.now() - timerState.startTime) / 1000);
-    const hours = Math.floor(totalSeconds / 3600);
-    const minutes = Math.floor((totalSeconds % 3600) / 60);
-    
-    // Pre-fill manual entry with timer values (already filled by updateTimerDisplay)
-    document.getElementById('manualHours').value = hours;
-    document.getElementById('manualMinutes').value = minutes;
+    setManualDurationFromSeconds(totalSeconds);
 
     if (currentActivity) {
         pausedTimers[currentActivity.id] = {
@@ -1255,18 +1706,11 @@ function updateTimerDisplay() {
     const totalSeconds = Math.floor((Date.now() - timerState.startTime) / 1000);
     timerState.elapsed = totalSeconds;
     
-    const hours = Math.floor(totalSeconds / 3600);
-    const minutes = Math.floor((totalSeconds % 3600) / 60);
-    const seconds = totalSeconds % 60;
-    
     const display = formatElapsedHms(totalSeconds);
     document.getElementById('timerDisplay').textContent = display;
     
     // Update manual entry fields in real-time
-    document.getElementById('manualHours').value = hours;
-    const totalMinutes = Math.floor(totalSeconds / 60);
-    const remainder = totalMinutes % 60;
-    document.getElementById('manualMinutes').value = remainder;
+    setManualDurationFromSeconds(totalSeconds);
 }
 
 // Save Session
@@ -1274,28 +1718,36 @@ async function saveSession(durationMinutes, rewardRating) {
     try {
         const sessionId = 'SES_' + Date.now();
         const timestamp = new Date().toISOString();
-        
-        await gapi.client.sheets.spreadsheets.values.append({
-            spreadsheetId: spreadsheetId,
-            range: 'Sessions!A:E',
-            valueInputOption: 'RAW',
-            resource: {
-                values: [[sessionId, currentActivity.id, timestamp, durationMinutes, rewardRating]]
-            }
-        });
+
+        await runWithApiRetries(async () => {
+            await gapi.client.sheets.spreadsheets.values.append({
+                spreadsheetId: spreadsheetId,
+                range: 'Sessions!A:E',
+                valueInputOption: 'RAW',
+                resource: {
+                    values: [[sessionId, currentActivity.id, timestamp, durationMinutes, rewardRating]]
+                }
+            });
+        }, 'saveSession');
         
         return true;
     } catch (error) {
         console.error('Error saving session:', error);
         
         // Check if token expired
-        const status = error.status || error.result?.error?.code;
-        if (status === 401 || status === 403) {
+        const statusCode = getApiErrorStatus(error);
+        if (statusCode === 401 || statusCode === 403) {
             handleTokenExpiration();
             return false;
         }
         
-        showError('Failed to save session: ' + (error.result?.error?.message || error.message || 'Unknown error'));
+        const status = statusCode;
+        const detail = error.result?.error?.message || error.message || 'Unknown error';
+        if ([502, 503, 504].includes(status)) {
+            showError(`Failed to save session after retrying (${status}). Please tap Save Rating again. Details: ${detail}`);
+        } else {
+            showError('Failed to save session: ' + detail);
+        }
         return false;
     }
 }
@@ -1362,6 +1814,49 @@ document.addEventListener('DOMContentLoaded', () => {
         hideError();
         location.reload();
     });
+
+    const warningThresholdInput = document.getElementById('warningThresholdInput');
+    const warningThresholdSaveBtn = document.getElementById('saveWarningThresholdBtn');
+    const settingsToggleBtn = document.getElementById('settingsToggleBtn');
+    const settingsCloseBtn = document.getElementById('settingsCloseBtn');
+    const settingsModal = document.getElementById('settingsModal');
+    if (warningThresholdSaveBtn) {
+        warningThresholdSaveBtn.addEventListener('click', saveWarningThresholdSettingFromUi);
+    }
+    if (settingsToggleBtn) {
+        settingsToggleBtn.addEventListener('click', () => {
+            toggleWarningThresholdPanel();
+            setTimeout(pinSettingsControlsTopRight, 0);
+        });
+    }
+    if (settingsCloseBtn) {
+        settingsCloseBtn.addEventListener('click', closeWarningThresholdPanel);
+    }
+    if (settingsModal) {
+        settingsModal.addEventListener('click', (e) => {
+            if (e.target === settingsModal) {
+                closeWarningThresholdPanel();
+            }
+        });
+    }
+    document.addEventListener('keydown', (e) => {
+        if (e.key === 'Escape') {
+            closeWarningThresholdPanel();
+        }
+    });
+    if (warningThresholdInput) {
+        warningThresholdInput.addEventListener('keydown', (e) => {
+            if (e.key === 'Enter') {
+                e.preventDefault();
+                saveWarningThresholdSettingFromUi();
+            }
+        });
+    }
+    renderWarningThresholdSettings();
+    pinSettingsControlsTopRight();
+    setTimeout(pinSettingsControlsTopRight, 0);
+    setTimeout(pinSettingsControlsTopRight, 250);
+    window.addEventListener('resize', pinSettingsControlsTopRight);
     
     // Add Activity Inline
     document.getElementById('addActivityBtn').addEventListener('click', () => {
@@ -1423,61 +1918,92 @@ document.addEventListener('DOMContentLoaded', () => {
     // Manual Entry Form
     document.getElementById('manualEntryForm').addEventListener('submit', async (e) => {
         e.preventDefault();
-        
-        const hours = parseInt(document.getElementById('manualHours').value) || 0;
-        const minutes = parseInt(document.getElementById('manualMinutes').value) || 0;
-        const reward = parseInt(document.getElementById('rewardRating').value);
-        
-        const totalMinutes = hours * 60 + minutes;
-        
-        if (totalMinutes === 0) {
-            alert('Please enter a duration greater than 0.');
-            return;
+
+        if (saveRatingInFlight) return;
+        saveRatingInFlight = true;
+
+        const saveBtn = document.querySelector('#manualEntryForm button[type="submit"]');
+        const previousLabel = saveBtn ? saveBtn.textContent : '';
+        if (saveBtn) {
+            saveBtn.disabled = true;
+            saveBtn.textContent = 'Saving...';
         }
-        
-        const success = await saveSession(totalMinutes, reward);
-        if (success) {
-            if (currentActivity) {
-                delete pausedTimers[currentActivity.id];
-                if (pendingRatingActivityId === currentActivity.id) {
-                    pendingRatingActivityId = null;
+
+        try {
+            const days = parseNonNegativeInt(document.getElementById('manualDays').value);
+            const hours = parseNonNegativeInt(document.getElementById('manualHours').value);
+            const minutes = parseInt(document.getElementById('manualMinutes').value) || 0;
+            const reward = parseInt(document.getElementById('rewardRating').value);
+
+            const totalMinutes = (days * 24 * 60) + (hours * 60) + parseNonNegativeInt(minutes);
+
+            if (totalMinutes === 0) {
+                alert('Please enter a duration greater than 0.');
+                return;
+            }
+
+            const success = await saveSession(totalMinutes, reward);
+            if (success) {
+                if (currentActivity) {
+                    delete pausedTimers[currentActivity.id];
+                    if (pendingRatingActivityId === currentActivity.id) {
+                        pendingRatingActivityId = null;
+                    }
                 }
-            }
 
-            // Stop the timer only after session save succeeds.
-            if (currentActivity && runningTimers[currentActivity.id]) {
-                delete runningTimers[currentActivity.id];
-                localStorage.setItem('runningTimers', JSON.stringify(runningTimers));
-                await removeTimerFromSheet(currentActivity.id);
-                await notifyNativeTimerStop(currentActivity.id);
-            }
+                // Stop the timer only after session save succeeds.
+                if (currentActivity && runningTimers[currentActivity.id]) {
+                    delete runningTimers[currentActivity.id];
+                    localStorage.setItem('runningTimers', JSON.stringify(runningTimers));
+                    await removeTimerFromSheet(currentActivity.id);
+                    await notifyNativeTimerStop(currentActivity.id);
+                }
 
-            // Ensure detail page controls reflect stopped state.
-            document.getElementById('stopTimerBtn').classList.add('hidden');
-            document.getElementById('startTimerBtn').classList.remove('hidden');
-            if (timerInterval) {
-                clearInterval(timerInterval);
-                timerInterval = null;
-            }
-            timerState.running = false;
-            timerState.startTime = null;
-            timerState.elapsed = 0;
-            document.getElementById('timerDisplay').textContent = '00:00:00';
-            document.getElementById('startTimerBtn').textContent = 'Start Timer';
+                // Ensure detail page controls reflect stopped state.
+                document.getElementById('stopTimerBtn').classList.add('hidden');
+                document.getElementById('startTimerBtn').classList.remove('hidden');
+                if (timerInterval) {
+                    clearInterval(timerInterval);
+                    timerInterval = null;
+                }
+                timerState.running = false;
+                timerState.startTime = null;
+                timerState.elapsed = 0;
+                document.getElementById('timerDisplay').textContent = '00:00:00';
+                document.getElementById('startTimerBtn').textContent = 'Start Timer';
 
-            // Reset form
-            document.getElementById('manualHours').value = 0;
-            document.getElementById('manualMinutes').value = 0;
-            document.getElementById('rewardRating').value = 5;
-            document.getElementById('ratingDisplay').textContent = 5;
-            
-            // Reload activity detail
-            await loadActivityDetail(currentActivity.id);
-            
-        } else {
-            alert('Error saving session. Please try again.');
+                // Reset form
+                document.getElementById('manualDays').value = 0;
+                document.getElementById('manualHours').value = 0;
+                document.getElementById('manualMinutes').value = 0;
+                document.getElementById('rewardRating').value = 5;
+                document.getElementById('ratingDisplay').textContent = 5;
+                updateSaveRatingButtonState();
+
+                // Reload activity detail
+                await loadActivityDetail(currentActivity.id);
+
+            } else {
+                alert('Error saving session. Please try again.');
+            }
+        } finally {
+            saveRatingInFlight = false;
+            if (saveBtn) {
+                saveBtn.textContent = previousLabel;
+            }
+            updateSaveRatingButtonState();
         }
     });
+
+    ['manualDays', 'manualHours', 'manualMinutes'].forEach((id) => {
+        const el = document.getElementById(id);
+        if (!el) return;
+        el.addEventListener('input', updateSaveRatingButtonState);
+        el.addEventListener('change', updateSaveRatingButtonState);
+    });
+    enforceCompactDurationInputs();
+    window.addEventListener('resize', enforceCompactDurationInputs);
+    updateSaveRatingButtonState();
     
     // Check if Google API loaded after a timeout
     setTimeout(() => {
@@ -1496,7 +2022,7 @@ document.addEventListener('DOMContentLoaded', () => {
     // Pull running timer state from sheet periodically for cross-device live sync.
     setInterval(() => {
         refreshHomeTimersFromSheet();
-    }, 5000);
+    }, HOME_TIMER_SYNC_INTERVAL_MS);
 });
 
 // Update running timer displays on main screen
@@ -1599,8 +2125,6 @@ async function stopTimerFromCard(activityId, activityName) {
     }
     
     const totalSeconds = Math.floor((Date.now() - timerData.startTime) / 1000);
-    const hours = Math.floor(totalSeconds / 3600);
-    const minutes = Math.floor((totalSeconds % 3600) / 60);
 
     // Keep timer running in background. Only pause UI until save or resume.
     pausedTimers[activityId] = {
@@ -1617,8 +2141,7 @@ async function stopTimerFromCard(activityId, activityName) {
 
     // Pre-fill rating form duration from paused elapsed time.
     setTimeout(() => {
-        document.getElementById('manualHours').value = hours;
-        document.getElementById('manualMinutes').value = minutes;
+        setManualDurationFromSeconds(totalSeconds);
         document.getElementById('manualEntryForm').scrollIntoView({ behavior: 'smooth', block: 'center' });
     }, 100);
 }
@@ -1757,10 +2280,7 @@ function showQuickRateModal(activityId, activityName, startTimeMs) {
     _quickRateActivity = { id: activityId, name: activityName };
     const elapsedMs = Date.now() - startTimeMs;
     _quickRateDurationMins = Math.max(1, Math.round(elapsedMs / 60000));
-    const totalSecs = Math.floor(elapsedMs / 1000);
-    const h = Math.floor(totalSecs / 3600);
-    const m = Math.floor((totalSecs % 3600) / 60);
-    const durationText = h > 0 ? `${h}h ${m}m` : `${m}m`;
+    const durationText = formatDurationMinutesDhm(_quickRateDurationMins);
 
     document.getElementById('quickRateActivityName').textContent = activityName;
     document.getElementById('quickRateDuration').textContent = `Duration: ${durationText}`;

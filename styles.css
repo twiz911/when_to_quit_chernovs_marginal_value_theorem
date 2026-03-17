@@ -88,6 +88,54 @@ header h2 {
     font-weight: 400;
 }
 
+.home-header-row {
+    display: flex;
+    align-items: flex-start;
+    justify-content: space-between;
+    gap: 0.75rem;
+    flex-wrap: nowrap;
+    position: relative;
+    padding-right: 2.75rem;
+}
+
+.home-header-title {
+    min-width: 0;
+    flex: 1 1 auto;
+}
+
+.settings-cog-btn {
+    position: absolute;
+    top: 0;
+    right: 0;
+    width: 1.9em;
+    height: 1.9em;
+    border: 1px solid rgba(255, 255, 255, 0.45);
+    border-radius: 0.5rem;
+    background: rgba(255, 255, 255, 0.14);
+    color: #fff;
+    font-size: 1.45rem;
+    line-height: 1;
+    cursor: pointer;
+    flex: 0 0 auto;
+    margin-left: 0;
+    align-self: auto;
+    order: 0;
+}
+
+#settingsToggleBtn.settings-cog-btn {
+    position: absolute !important;
+    top: 0 !important;
+    right: 0 !important;
+    left: auto !important;
+    margin: 0 !important;
+    transform: none;
+    z-index: 3;
+}
+
+.settings-cog-btn:active {
+    transform: scale(0.97);
+}
+
 /* Buttons */
 .btn {
     padding: 0.75rem 1.5rem;
@@ -234,6 +282,128 @@ header h2 {
     display: block;
 }
 
+.settings-card {
+    margin: 0 1.5rem 1rem;
+    background: var(--card-background);
+    border: 1px solid var(--border-color);
+    border-radius: 0.75rem;
+    box-shadow: var(--shadow);
+    padding: 0.75rem;
+}
+
+.settings-card--modal {
+    margin: 0;
+}
+
+.settings-modal-content {
+    width: min(92vw, 420px);
+    padding: 0.85rem;
+}
+
+.settings-modal-header {
+    display: flex;
+    align-items: center;
+    justify-content: flex-start;
+    margin-bottom: 0.55rem;
+    position: relative;
+    min-height: 2.9rem;
+    padding-right: 3.2rem;
+}
+
+.settings-modal-content .settings-modal-header h2 {
+    margin: 0;
+    font-size: 1rem;
+    color: var(--text-primary);
+    text-align: left;
+}
+
+.settings-close-btn {
+    position: absolute;
+    top: 0;
+    right: 0;
+    width: 2.6rem;
+    height: 2.6rem;
+    border: 1px solid var(--border-color);
+    border-radius: 0.5rem;
+    background: #fff;
+    color: var(--text-primary);
+    font-size: 1.25rem;
+    line-height: 1;
+    cursor: pointer;
+}
+
+#settingsCloseBtn.settings-close-btn {
+    position: absolute !important;
+    top: 0 !important;
+    right: 0 !important;
+    left: auto !important;
+    margin: 0 !important;
+    z-index: 3;
+}
+
+.settings-close-btn:active {
+    transform: scale(0.97);
+}
+
+.settings-card-title {
+    font-size: 0.9rem;
+    font-weight: 700;
+    color: var(--text-primary);
+    margin-bottom: 0.2rem;
+}
+
+.settings-card-text {
+    font-size: 0.76rem;
+    color: var(--text-secondary);
+    margin-bottom: 0.55rem;
+}
+
+.settings-threshold-row {
+    display: grid;
+    grid-template-columns: 1fr;
+    align-items: center;
+    gap: 0.5rem;
+}
+
+.settings-threshold-field {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    gap: 0.5rem;
+    width: 100%;
+    min-width: 0;
+}
+
+.settings-threshold-field label {
+    display: inline-flex;
+    align-items: center;
+    font-size: 0.76rem;
+    margin-bottom: 0;
+    min-width: 2.8rem;
+}
+
+.settings-threshold-field input[type="number"] {
+    width: 5.2rem;
+    min-width: 5.2rem;
+    text-align: center;
+    padding: 0.45rem 0.3rem;
+}
+
+.settings-threshold-row .btn {
+    width: 100%;
+    min-width: 0;
+    height: 2.15rem;
+    min-height: 2.15rem;
+    padding: 0.35rem 0.75rem;
+    font-size: 0.86rem;
+}
+
+.settings-status {
+    margin-top: 0.45rem;
+    font-size: 0.74rem;
+    color: var(--text-secondary);
+}
+
 /* Activities List */
 .activities-list {
     padding: 0 1.5rem 1.5rem;
@@ -346,7 +516,7 @@ header h2 {
 
 .activity-metrics {
     display: grid;
-    grid-template-columns: 1fr 1fr;
+    grid-template-columns: repeat(3, minmax(0, 1fr));
     gap: 0.75rem;
 }
 
@@ -357,17 +527,24 @@ header h2 {
 }
 
 .metric-label {
-    font-size: 0.75rem;
+    font-size: 0.68rem;
     color: var(--text-secondary);
-    margin-bottom: 0.25rem;
+    margin-bottom: 0.2rem;
     text-transform: uppercase;
-    letter-spacing: 0.05em;
+    letter-spacing: 0.02em;
+    white-space: normal;
+    overflow-wrap: anywhere;
+    line-height: 1.1;
 }
 
 .metric-value {
     font-size: 1.25rem;
     font-weight: 700;
     color: var(--primary-color);
+}
+
+.metric-value-time {
+    font-size: 0.95rem;
 }
 
 .metric-value.below-average {
@@ -391,11 +568,14 @@ header h2 {
 }
 
 .stat-label {
-    font-size: 0.75rem;
+    font-size: 0.68rem;
     color: var(--text-secondary);
-    margin-bottom: 0.5rem;
+    margin-bottom: 0.35rem;
     text-transform: uppercase;
-    letter-spacing: 0.05em;
+    letter-spacing: 0.02em;
+    white-space: normal;
+    overflow-wrap: anywhere;
+    line-height: 1.1;
 }
 
 .stat-value {
@@ -533,6 +713,36 @@ form {
     display: grid;
     grid-template-columns: 1fr 1fr;
     gap: 1rem;
+}
+
+.duration-row {
+    display: flex;
+    gap: 0.4rem;
+    align-items: flex-end;
+    justify-content: center;
+    flex-wrap: nowrap !important;
+}
+
+.duration-row .form-group {
+    flex: 0 0 auto;
+    width: 2.6rem;
+    margin-bottom: 0.5rem;
+}
+
+.duration-row label {
+    font-size: 0.74rem;
+    margin-bottom: 0.25rem;
+    text-align: center;
+}
+
+.duration-row input[type="number"] {
+    width: 2.6rem !important;
+    min-width: 2.6rem;
+    max-width: 2.6rem;
+    height: 2rem;
+    padding: 0.2rem 0.25rem;
+    font-size: 0.82rem;
+    text-align: center;
 }
 
 label {
@@ -1047,11 +1257,11 @@ input[type="range"]::-moz-range-thumb {
 }
 
 /* Responsive */
-@media (max-width: 400px) {
+@media (max-width: 768px) {
     header {
         padding: 1.5rem 1rem;
     }
-    
+
     header h1 {
         font-size: 1.5rem;
     }
@@ -1062,6 +1272,24 @@ input[type="range"]::-moz-range-thumb {
     
     .activity-metrics {
         grid-template-columns: 1fr;
+    }
+
+    .duration-row {
+        gap: 0.25rem;
+        flex-wrap: nowrap !important;
+    }
+
+    .duration-row .form-group {
+        width: 2.6rem;
+    }
+
+    .duration-row input[type="number"] {
+        width: 2.6rem !important;
+        min-width: 2.6rem;
+        max-width: 2.6rem;
+        height: 1.85rem;
+        padding: 0.15rem 0.2rem;
+        font-size: 0.75rem;
     }
 }
 

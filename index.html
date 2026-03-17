@@ -34,8 +34,13 @@
         <!-- Home Page -->
         <div id="homePage" class="page active">
             <header>
-                <h1>When To Quit</h1>
-                <p class="subtitle">Marginal Value Theorem</p>
+                <div class="home-header-row">
+                    <div class="home-header-title">
+                        <h1>When To Quit</h1>
+                        <p class="subtitle">Marginal Value Theorem</p>
+                    </div>
+                    <button id="settingsToggleBtn" class="settings-cog-btn" type="button" aria-label="Open settings">⚙</button>
+                </div>
             </header>
             
             <div id="addActivityContainer" class="add-activity-container">
@@ -56,7 +61,28 @@
                 <!-- Activities will be loaded here -->
             </div>
             
-            <div id="loadingIndicator" class="loading">Loading activities...</div>
+            <div id="loadingIndicator" class="loading"></div>
+        </div>
+
+        <div id="settingsModal" class="modal hidden" aria-hidden="true">
+            <div class="modal-content settings-modal-content" role="dialog" aria-modal="true" aria-label="Warning threshold settings">
+                <div class="settings-modal-header">
+                    <h2>Settings</h2>
+                    <button id="settingsCloseBtn" class="settings-close-btn" type="button" aria-label="Close settings">✕</button>
+                </div>
+                <section class="settings-card settings-card--modal" aria-label="Warning threshold settings">
+                    <div class="settings-card-title">Warning Threshold</div>
+                    <p class="settings-card-text">Show quit warnings only when declining recent time is at least this percent.</p>
+                    <div class="settings-threshold-row">
+                        <div class="settings-threshold-field">
+                            <label for="warningThresholdInput">Percent</label>
+                            <input type="number" id="warningThresholdInput" min="0" max="50" step="1" value="20">
+                        </div>
+                        <button id="saveWarningThresholdBtn" class="btn btn-primary" type="button">Save</button>
+                    </div>
+                    <div id="warningThresholdStatus" class="settings-status">Current: 20%</div>
+                </section>
+            </div>
         </div>
 
         <!-- Error Modal -->
@@ -287,7 +313,11 @@
                 </div>
                 
                 <form id="manualEntryForm">
-                    <div class="form-row">
+                    <div class="form-row duration-row">
+                        <div class="form-group">
+                            <label for="manualDays">Days</label>
+                            <input type="number" id="manualDays" min="0" value="0" step="1">
+                        </div>
                         <div class="form-group">
                             <label for="manualHours">Hours</label>
                             <input type="number" id="manualHours" min="0" value="0" step="1">
@@ -304,7 +334,7 @@
                         <div class="rating-display" id="ratingDisplay">5</div>
                     </div>
                     
-                    <button type="submit" class="btn btn-primary">Save Entry</button>
+                    <button type="submit" class="btn btn-primary">Save Rating</button>
                 </form>
             </div>
             

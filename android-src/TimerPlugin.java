@@ -58,6 +58,30 @@ public class TimerPlugin extends Plugin {
         call.resolve();
     }
 
+    @PluginMethod
+    public void syncAuthContext(PluginCall call) {
+        String spreadsheetId = call.getString("spreadsheetId", "");
+        String accessToken = call.getString("accessToken", "");
+
+        getContext()
+            .getSharedPreferences("TimerPrefs", 0)
+            .edit()
+            .putString("spreadsheetId", spreadsheetId)
+            .putString("authAccessToken", accessToken)
+            .apply();
+        call.resolve();
+    }
+
+    @PluginMethod
+    public void clearAuthContext(PluginCall call) {
+        getContext()
+            .getSharedPreferences("TimerPrefs", 0)
+            .edit()
+            .remove("authAccessToken")
+            .apply();
+        call.resolve();
+    }
+
     /**
      * Check whether the app was launched/resumed from the "Stop & Rate"
      * notification action.  Returns { action: "STOP_AND_RATE", activityId,

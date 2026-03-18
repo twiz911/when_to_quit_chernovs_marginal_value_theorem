@@ -27,9 +27,10 @@ function isNativeAndroid() {
 
         // Fallback detection for Capacitor WebView where getPlatform may not be ready yet.
         const originLooksNative = window.location.origin === 'https://localhost';
+        const isActuallyLocalhostWebView = window.location.protocol === 'https:' && window.location.hostname === 'localhost';
         const ua = navigator.userAgent || '';
         const uaLooksAndroid = /Android/i.test(ua);
-        return originLooksNative && (uaLooksAndroid || !!window.Capacitor);
+        return isActuallyLocalhostWebView && (uaLooksAndroid || !!window.Capacitor);
     } catch (e) {
         return false;
     }
@@ -87,22 +88,106 @@ const TimerPlugin = (() => {
     try { return window.Capacitor?.Plugins?.TimerPlugin || null; } catch (e) { return null; }
 })();
 
+// Web Notification helpers
+async function ensureWebNotificationPermission() {
+    if (!('Notification' in window)) {
+        console.log('Web Notifications not supported in this browser.');
+        return false;
+    }
+    if (Notification.permission === 'granted') return true;
+    if (Notification.permission !== 'denied') {
+        try {
+            console.log('Requesting Web Notification permission...');
+            const p = await Notification.requestPermission();
+            console.log('Permission result:', p);
+            return p === 'granted';
+        } catch (e) {
+            console.warn('Notification permission request failed', e);
+        }
+    } else {
+        console.log('Web Notification permission is currently DENIED. Check your browser URL bar settings.');
+    }
+    return false;
+}
+
+let webNotifications = {}; // activityId -> Notification object
+
+function showWebNotification(activityId, activityName, startTime) {
+    if (!('Notification' in window) || Notification.permission !== 'granted') {
+        return;
+    }
+    
+    // Do not recreate if already showing
+    if (webNotifications[activityId]) {
+        return;
+    }
+    
+    try {
+        const notif = new Notification(`${activityName} running`, {
+            body: 'Timer is active. Click to return.',
+            tag: `timer_${activityId}`,
+            requireInteraction: true // Makes it persistent on desktop Chrome
+        });
+        
+        notif.onclick = () => {
+            window.focus();
+            openActivity(activityId, activityName);
+            notif.close();
+            // Optional: delete from tracker when clicked, so it can be re-shown next sync if still running
+            delete webNotifications[activityId];
+        };
+
+        // When the user dismisses it manually or the OS clears it
+        notif.onclose = () => {
+            delete webNotifications[activityId];
+        };
+        
+        webNotifications[activityId] = notif;
+    } catch (e) {
+        console.warn('Failed to show web notification:', e);
+    }
+}
+
+function hideWebNotification(activityId) {
+    if (webNotifications[activityId]) {
+        webNotifications[activityId].close();
+        delete webNotifications[activityId];
+    }
+}
+
+function hideAllWebNotifications() {
+    Object.values(webNotifications).forEach(n => n.close());
+    webNotifications = {};
+}
+
 async function notifyNativeTimerStart(activityId, activityName, startTime) {
-    if (!TimerPlugin) return;
-    try { await TimerPlugin.startService({ activityId, activityName, startTime }); }
-    catch (e) { console.warn('TimerPlugin.startService:', e); }
+    console.log('notifyNativeTimerStart called:', { activityId, activityName, startTime, isNative: isNativeAndroid(), hasPlugin: !!TimerPlugin });
+    if (isNativeAndroid() && TimerPlugin) {
+        try { await TimerPlugin.startService({ activityId, activityName, startTime }); }
+        catch (e) { console.warn('TimerPlugin.startService:', e); }
+    } else {
+        await ensureWebNotificationPermission();
+        showWebNotification(activityId, activityName, startTime);
+    }
 }
 
 async function notifyNativeTimerStop(activityId = null) {
-    if (!TimerPlugin) return;
-    try {
+    if (isNativeAndroid() && TimerPlugin) {
+        try {
+            if (activityId) {
+                await TimerPlugin.stopService({ activityId });
+            } else {
+                await TimerPlugin.stopService();
+            }
+        }
+        catch (e) { console.warn('TimerPlugin.stopService:', e); }
+    } else {
         if (activityId) {
-            await TimerPlugin.stopService({ activityId });
+            hideWebNotification(activityId);
         } else {
-            await TimerPlugin.stopService();
+            hideAllWebNotifications();
         }
     }
-    catch (e) { console.warn('TimerPlugin.stopService:', e); }
 }
 
 function formatElapsedHms(totalSeconds) {
@@ -256,8 +341,6 @@ async function runWithApiRetries(task, label, maxRetries = 3, baseDelayMs = 400)
 }
 
 async function syncRunningTimersToNativeNotifications(forceReconcile = false) {
-    if (!TimerPlugin) return;
-
     if (forceReconcile) {
         // Clear all native timer notifications/service state first, then rebuild
         // from the current runningTimers snapshot to avoid stale notifications.
@@ -265,6 +348,12 @@ async function syncRunningTimersToNativeNotifications(forceReconcile = false) {
     }
 
     const entries = Object.entries(runningTimers || {});
+    
+    // Request permission if there are running timers and we are on web
+    if (!isNativeAndroid() && entries.length > 0) {
+        await ensureWebNotificationPermission();
+    }
+
     for (const [activityId, timer] of entries) {
         const startTime = Number(timer?.startTime);
         const activityName = getKnownActivityName(activityId, timer?.activityName || 'Activity');
@@ -576,7 +665,7 @@ function startAndroidRedirectAuth() {
     authUrl.searchParams.set('response_type', 'token');
     authUrl.searchParams.set('scope', SCOPES);
     authUrl.searchParams.set('include_granted_scopes', 'true');
-    authUrl.searchParams.set('prompt', 'consent select_account');
+    // Omitting prompt to allow automatic silent redirect-return if the user is already signed in and consented
     authUrl.searchParams.set('state', state);
 
     window.location.assign(authUrl.toString());
@@ -1610,6 +1699,12 @@ let timerState = {
 };
 
 async function startTimer() {
+    console.log('startTimer called, isNativeAndroid:', isNativeAndroid());
+    if (!isNativeAndroid()) {
+        // Trigger permission prompt synchronously on user gesture and wait for it
+        await ensureWebNotificationPermission();
+    }
+
     if (!currentActivity) {
         showError('No activity selected');
         return;
@@ -2079,6 +2174,12 @@ function renderCardRunningState(activityId, activityName, startTime) {
 
 // Start timer from activity card on main screen
 async function startTimerFromCard(activityId, activityName) {
+    console.log('startTimerFromCard called, isNativeAndroid:', isNativeAndroid());
+    if (!isNativeAndroid()) {
+        // Trigger permission prompt synchronously on user gesture and wait for it
+        await ensureWebNotificationPermission();
+    }
+
     if (pausedTimers[activityId] && runningTimers[activityId]) {
         delete pausedTimers[activityId];
         if (pendingRatingActivityId === activityId) {

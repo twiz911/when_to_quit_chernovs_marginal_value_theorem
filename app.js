@@ -111,40 +111,54 @@ async function ensureWebNotificationPermission() {
 }
 
 let webNotifications = {}; // activityId -> Notification object
+let webNotificationIntervals = {}; // activityId -> interval ID
 
 function showWebNotification(activityId, activityName, startTime) {
     if (!('Notification' in window) || Notification.permission !== 'granted') {
         return;
     }
     
-    // Do not recreate if already showing
-    if (webNotifications[activityId]) {
-        return;
-    }
-    
-    try {
-        const notif = new Notification(`${activityName} running`, {
-            body: 'Timer is active. Click to return.',
-            tag: `timer_${activityId}`,
-            requireInteraction: true // Makes it persistent on desktop Chrome
-        });
-        
-        notif.onclick = () => {
-            window.focus();
-            openActivity(activityId, activityName);
-            notif.close();
-            // Optional: delete from tracker when clicked, so it can be re-shown next sync if still running
-            delete webNotifications[activityId];
-        };
+    const updateNotification = () => {
+        try {
+            const elapsed = Math.max(0, Math.floor((Date.now() - startTime) / 1000));
+            const timeStr = formatElapsedHms(elapsed);
+            
+            const notif = new Notification(`${activityName} running`, {
+                body: `⏱ ${timeStr} - Click to return.`,
+                tag: `timer_${activityId}`,
+                requireInteraction: true, // Makes it persistent on desktop Chrome
+                silent: true,             // Prevents notification sound from chiming repeatedly
+                renotify: false           // Prevents OS from re-alerting if tag exists
+            });
+            
+            notif.onclick = () => {
+                window.focus();
+                openActivity(activityId, activityName);
+                notif.close();
+                delete webNotifications[activityId];
+                // Do not clear interval, allow it to tick and redraw if timer runs
+            };
 
-        // When the user dismisses it manually or the OS clears it
-        notif.onclose = () => {
-            delete webNotifications[activityId];
-        };
-        
-        webNotifications[activityId] = notif;
-    } catch (e) {
-        console.warn('Failed to show web notification:', e);
+            // When the user dismisses it manually or the OS clears it
+            notif.onclose = () => {
+                delete webNotifications[activityId];
+                // Do not clear interval, allow next sync/interval to redraw if still running
+            };
+            
+            webNotifications[activityId] = notif;
+        } catch (e) {
+            console.warn('Failed to show web notification:', e);
+        }
+    };
+
+    if (!webNotificationIntervals[activityId]) {
+        // Draw immediately, then update every minute
+        updateNotification();
+        webNotificationIntervals[activityId] = setInterval(updateNotification, 60000);
+    } else if (!webNotifications[activityId]) {
+        // We already have an interval running but the notification was manually closed.
+        // Redraw it immediately so it comes back on sync
+        updateNotification();
     }
 }
 
@@ -153,11 +167,17 @@ function hideWebNotification(activityId) {
         webNotifications[activityId].close();
         delete webNotifications[activityId];
     }
+    if (webNotificationIntervals[activityId]) {
+        clearInterval(webNotificationIntervals[activityId]);
+        delete webNotificationIntervals[activityId];
+    }
 }
 
 function hideAllWebNotifications() {
     Object.values(webNotifications).forEach(n => n.close());
     webNotifications = {};
+    Object.values(webNotificationIntervals).forEach(i => clearInterval(i));
+    webNotificationIntervals = {};
 }
 
 async function notifyNativeTimerStart(activityId, activityName, startTime) {
@@ -341,24 +361,43 @@ async function runWithApiRetries(task, label, maxRetries = 3, baseDelayMs = 400)
 }
 
 async function syncRunningTimersToNativeNotifications(forceReconcile = false) {
-    if (forceReconcile) {
-        // Clear all native timer notifications/service state first, then rebuild
-        // from the current runningTimers snapshot to avoid stale notifications.
-        await notifyNativeTimerStop();
-    }
-
     const entries = Object.entries(runningTimers || {});
-    
-    // Request permission if there are running timers and we are on web
-    if (!isNativeAndroid() && entries.length > 0) {
-        await ensureWebNotificationPermission();
-    }
 
-    for (const [activityId, timer] of entries) {
-        const startTime = Number(timer?.startTime);
-        const activityName = getKnownActivityName(activityId, timer?.activityName || 'Activity');
-        if (!activityId || !Number.isFinite(startTime) || startTime <= 0) continue;
-        await notifyNativeTimerStart(activityId, activityName, startTime);
+    if (isNativeAndroid()) {
+        if (forceReconcile) {
+            // Clear all native timer notifications/service state first, then rebuild
+            // from the current runningTimers snapshot to avoid stale notifications.
+            await notifyNativeTimerStop();
+        }
+
+        for (const [activityId, timer] of entries) {
+            const startTime = Number(timer?.startTime);
+            const activityName = getKnownActivityName(activityId, timer?.activityName || 'Activity');
+            if (!activityId || !Number.isFinite(startTime) || startTime <= 0) continue;
+            await notifyNativeTimerStart(activityId, activityName, startTime);
+        }
+    } else {
+        // Web Notification Sync
+        if (entries.length > 0) {
+            await ensureWebNotificationPermission();
+        }
+
+        const activeIds = entries.map(e => e[0]);
+
+        // Cleanup notifications for timers that are no longer running
+        Object.keys(webNotificationIntervals).forEach(id => {
+            if (!activeIds.includes(id)) {
+                hideWebNotification(id);
+            }
+        });
+
+        // Ensure well-known running timers have notifications showing
+        for (const [activityId, timer] of entries) {
+            const startTime = Number(timer?.startTime);
+            const activityName = getKnownActivityName(activityId, timer?.activityName || 'Activity');
+            if (!activityId || !Number.isFinite(startTime) || startTime <= 0) continue;
+            await notifyNativeTimerStart(activityId, activityName, startTime);
+        }
     }
 }
 
